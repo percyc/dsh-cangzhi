@@ -293,14 +293,29 @@ pnpm dsh web
 
 ### pnpm 报 `ERR_PNPM_UNEXPECTED_STORE`
 
-这表示 Profile 的 `node_modules` 由另一个 pnpm store 或不同主版本创建。不要为了兼容临时目录而修改全局 `store-dir`。如果 Profile 中记录的插件路径仍然存在，先使用当前 pnpm 重建依赖：
+这通常表示把旧机器的 `~/.dsh`、DSH Profile 或 `node_modules` 一起复制到了新机器。`node_modules/.modules.yaml` 记录了创建它的 pnpm store 绝对路径，不能跨机器复用。插件和 DSH 源码可以通过 Git 拉取或复制，但以下目录必须在目标机器重新生成：
+
+- DSH 源码中的 `node_modules`；
+- `$DSH_HOME/profiles/*/node_modules`；
+- 插件源码中的 `node_modules`（如果存在）。
+
+不要为了兼容旧机器的临时目录而修改全局 `store-dir`。在目标机器上先退出 DSH，将失效的 Profile 依赖目录保留为备份：
 
 ```bash
-cd "${DSH_HOME:-$HOME/.dsh}/profiles/web"
+export DSH_PROFILE_HOME="${DSH_HOME:-$HOME/.dsh}/profiles/web"
+export DSH_PROFILE_BACKUP="$DSH_PROFILE_HOME/node_modules.from-old-machine"
+test ! -e "$DSH_PROFILE_BACKUP" || { echo "备份目录已存在：$DSH_PROFILE_BACKUP"; exit 1; }
+mv "$DSH_PROFILE_HOME/node_modules" "$DSH_PROFILE_BACKUP"
+```
+
+然后使用目标机器的 pnpm 重新安装 Profile 依赖：
+
+```bash
+cd "$DSH_PROFILE_HOME"
 pnpm install
 ```
 
-如果同时提示旧的本地插件目录不存在，先通过 DSH 插件管理器移除失效依赖，再添加当前目录或 Git 地址：
+如果 `package.json` 或锁文件同时记录了旧机器上不存在的插件绝对路径，先通过 DSH 插件管理器移除失效依赖，再添加目标机器上的当前目录或 Git 地址：
 
 ```bash
 cd "$DSH_SOURCE"
@@ -309,7 +324,7 @@ pnpm dsh plugin --profile web add "$CANGZHI_PLUGIN_SPEC"
 pnpm dsh web --dump-config
 ```
 
-该操作只重建 Profile 的插件依赖，不会删除 DSH credentials 或藏知数据。
+确认安装正常后，可以删除备份目录 `node_modules.from-old-machine`。这些操作只重建 Profile 的插件依赖，不会删除 DSH credentials、DSH 设置或藏知数据。
 
 ### DSH 启动时报端口占用
 
