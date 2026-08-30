@@ -49,6 +49,11 @@ const zh = {
   healthOk: '藏知服务正常',
   healthWarning: '藏知有项目需要处理',
   healthError: '藏知服务异常',
+  healthMcpMissing: '模型检索尚未配置 PAT',
+  healthProcessingFailed: '{{count}} 份资料处理失败',
+  healthStorageHigh: '存储已使用 {{percent}}%',
+  healthDatabase: '数据库状态：{{status}}',
+  healthSystemUnavailable: '无法读取服务器状态',
   settingsTab: '藏知',
   settingsTitle: '藏知连接',
   settingsDescription: '配置 DSH 使用的藏知服务地址和默认知识空间。访问令牌仍由 DSH 凭据存储单独管理。',
@@ -104,6 +109,11 @@ const en = {
   healthOk: 'Cangzhi services are healthy',
   healthWarning: 'Cangzhi needs attention',
   healthError: 'Cangzhi services are unavailable',
+  healthMcpMissing: 'Model retrieval PAT is not configured',
+  healthProcessingFailed: '{{count}} documents failed processing',
+  healthStorageHigh: 'Storage is {{percent}}% used',
+  healthDatabase: 'Database status: {{status}}',
+  healthSystemUnavailable: 'Unable to read server status',
   settingsTab: 'Cangzhi',
   settingsTitle: 'Cangzhi connection',
   settingsDescription: 'Configure the Cangzhi services and default workspace used by DSH. Access tokens remain in the separate DSH credential store.',
@@ -514,6 +524,7 @@ type ConsoleActionProps = PropsRuntime<'sidebar.footer.action'>
 function ConsoleAction({ wide, useCangzhiConsole, openConsole, t }: ConsoleActionProps) {
   const state = useCangzhiConsole(value => value)
   const [health, setHealth] = useState<'checking' | 'ok' | 'warning' | 'error'>('checking')
+  const [healthDetail, setHealthDetail] = useState('')
   useEffect(() => {
     let alive = true
     const loadHealth = async () => {
@@ -521,24 +532,38 @@ function ConsoleAction({ wide, useCangzhiConsole, openConsole, t }: ConsoleActio
         const pluginResponse = await fetch('/_cangzhi-plugin/status', { cache: 'no-store' })
         if (!pluginResponse.ok) throw new Error('plugin status unavailable')
         const pluginStatus = await pluginResponse.json() as PluginStatus
-        let next: typeof health = pluginStatus.apiConnected ? (pluginStatus.mcpConfigured ? 'ok' : 'warning') : 'error'
+        let next: typeof health = pluginStatus.apiConnected ? 'ok' : 'error'
+        const details: string[] = []
+        if (!pluginStatus.mcpConfigured) {
+          next = 'warning'
+          details.push(t('healthMcpMissing'))
+        }
         if (pluginStatus.apiConnected) {
           const systemResponse = await fetch(`${API}/system/status`, { credentials: 'include', cache: 'no-store' })
           if (systemResponse.ok) {
             const systemStatus = await systemResponse.json() as SystemStatus
-            if (systemStatus.status === 'degraded') next = 'warning'
+            const issues = systemIssues(systemStatus)
+            if (issues.length > 0) next = 'warning'
+            for (const issue of issues) {
+              if (issue.kind === 'processing') details.push(t('healthProcessingFailed', { count: issue.failed }))
+              if (issue.kind === 'storage') details.push(t('healthStorageHigh', { percent: issue.usedPercent }))
+              if (issue.kind === 'database') details.push(t('healthDatabase', { status: issue.status }))
+            }
+          } else if (systemResponse.status >= 500) {
+            next = 'error'
+            details.push(t('healthSystemUnavailable'))
           }
         }
-        if (alive) setHealth(next)
+        if (alive) { setHealth(next); setHealthDetail(details.join(' · ')) }
       } catch {
-        if (alive) setHealth('error')
+        if (alive) { setHealth('error'); setHealthDetail(t('healthSystemUnavailable')) }
       }
     }
     void loadHealth()
     const timer = window.setInterval(() => { void loadHealth() }, 30_000)
     return () => { alive = false; window.clearInterval(timer) }
   }, [])
-  const healthLabel = health === 'ok' ? t('healthOk') : health === 'warning' ? t('healthWarning') : health === 'error' ? t('healthError') : t('healthChecking')
+  const healthLabel = healthDetail || (health === 'ok' ? t('healthOk') : health === 'warning' ? t('healthWarning') : health === 'error' ? t('healthError') : t('healthChecking'))
   return (
     <button
       type="button"
@@ -575,6 +600,26 @@ type SystemStatus = {
   database: { status: string; latency_ms: number }
   storage: { status: string; total_bytes: number; used_bytes: number; free_bytes: number; used_percent: number }
   processing: { active: number; waiting: number; failed: number }
+}
+type SystemIssue =
+  | { kind: 'database'; status: string }
+  | { kind: 'storage'; usedPercent: number }
+  | { kind: 'processing'; failed: number }
+
+function systemIssues(system: SystemStatus): SystemIssue[] {
+  const issues: SystemIssue[] = []
+  if (system.database.status !== 'ok') issues.push({ kind: 'database', status: system.database.status })
+  if (system.storage.status !== 'ok' || system.storage.used_percent >= 90) {
+    issues.push({ kind: 'storage', usedPercent: system.storage.used_percent })
+  }
+  if (system.processing.failed > 0) issues.push({ kind: 'processing', failed: system.processing.failed })
+  return issues
+}
+
+function systemIssueText(issue: SystemIssue): string {
+  if (issue.kind === 'processing') return `${issue.failed} 份资料处理失败，请到资料库筛选“失败”并检查或重新处理`
+  if (issue.kind === 'storage') return `存储已使用 ${issue.usedPercent}%，请清理空间或扩容（告警阈值 90%）`
+  return `数据库状态为 ${issue.status}`
 }
 type Tab = 'overview' | 'search' | 'documents' | 'create' | 'upload' | 'categories' | 'spaces' | 'connect'
 
@@ -721,6 +766,7 @@ function formatUptime(seconds: number): string {
 
 function Overview({ documents, categories, total, mcp, workspace, system, go }: { documents: DocumentItem[]; categories: Category[]; total: number; mcp: boolean; workspace: Workspace | null; system: SystemStatus | null; go(tab: Tab): void }) {
   const processing = documents.filter(item => ['processing', 'created', 'retry'].includes(item.pipeline?.overall_status ?? item.current_version?.processing_status ?? '')).length
+  const issues = system === null ? [] : systemIssues(system)
   return <>
     <div className={css.stats}>
       <article><small>知识资料</small><strong>{total}</strong><span>{workspace?.name ?? '当前空间'}</span></article>
@@ -729,8 +775,9 @@ function Overview({ documents, categories, total, mcp, workspace, system, go }: 
       <article><small>模型能力</small><strong>{mcp ? '14' : '—'}</strong><span>{mcp ? '对话工具在线' : '等待 PAT 配置'}</span></article>
     </div>
     {system && <section className={css.systemStatus} data-state={system.status}>
-      <div className={css.systemStatusTitle}><span/><div><strong>服务状态</strong><small>{system.status === 'ok' ? '藏知运行正常' : '有项目需要处理'}</small></div></div>
-      <dl><div><dt>API 运行</dt><dd>{formatUptime(system.uptime_seconds)}</dd></div><div><dt>数据库</dt><dd>{system.database.latency_ms} ms</dd></div><div><dt>存储可用</dt><dd>{formatCapacity(system.storage.free_bytes)}</dd></div><div><dt>处理队列</dt><dd>{system.processing.active} 处理中 · {system.processing.waiting} 等待</dd></div>{system.processing.failed > 0 && <div data-warning="true"><dt>处理失败</dt><dd>{system.processing.failed} 项</dd></div>}</dl>
+      <div className={css.systemStatusTitle}><span/><div><strong>服务器状态</strong><small>{issues.length === 0 ? '藏知运行正常' : `${issues.length} 项异常`}</small></div></div>
+      <dl><div><dt>API 运行</dt><dd>{formatUptime(system.uptime_seconds)}</dd></div><div data-warning={String(system.database.status !== 'ok')}><dt>数据库</dt><dd>{system.database.status === 'ok' ? `${system.database.latency_ms} ms` : system.database.status}</dd></div><div data-warning={String(system.storage.status !== 'ok' || system.storage.used_percent >= 90)}><dt>存储</dt><dd>{system.storage.used_percent}% 已用 · {formatCapacity(system.storage.free_bytes)} 可用</dd></div><div><dt>处理队列</dt><dd>{system.processing.active} 处理中 · {system.processing.waiting} 等待</dd></div>{system.processing.failed > 0 && <div data-warning="true"><dt>处理失败</dt><dd>{system.processing.failed} 项</dd></div>}</dl>
+      {issues.length > 0 && <div className={css.systemIssues} role="status"><strong>异常原因</strong><ul>{issues.map(issue => <li key={issue.kind}>{systemIssueText(issue)}</li>)}</ul>{issues.some(issue => issue.kind === 'processing') && <button onClick={() => go('documents')}>打开资料库</button>}</div>}
     </section>}
     <div className={css.quickActions}>
       <button onClick={() => go('upload')}><span>⇧</span><div><strong>上传资料</strong><small>批量添加文件并自动解析</small></div><b>→</b></button>
