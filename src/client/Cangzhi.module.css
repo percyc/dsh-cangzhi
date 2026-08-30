@@ -49,14 +49,11 @@
 .footerButtonRail .footerIcon { width: 18px; height: 18px; font-size: 18px; line-height: 18px; }
 
 .footerLabel {
-  flex: 1;
-  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sidebarHealthDot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-label-tertiary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent); }
+.sidebarHealthDot { flex: none; width: 8px; height: 8px; margin-left: auto; border-radius: 50%; background: var(--dsw-alias-label-tertiary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-label-tertiary) 12%, transparent); }
 .sidebarHealthDot[data-state='ok'] { background: #1ca46f; box-shadow: 0 0 0 2px color-mix(in srgb, #1ca46f 14%, transparent); }
 .sidebarHealthDot[data-state='warning'] { background: #e5a21a; box-shadow: 0 0 0 2px color-mix(in srgb, #e5a21a 14%, transparent); }
 .sidebarHealthDot[data-state='error'] { background: var(--dsw-alias-label-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-label-error) 14%, transparent); }
