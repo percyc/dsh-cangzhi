@@ -1,32 +1,23 @@
-.footer {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  height: 42px;
-  margin-top: 8px;
-}
-
-.footerRail {
-  width: 36px;
-  height: 36px;
-  margin: 0;
-}
-
 .footerButton {
+  flex: none;
   position: relative;
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 8px;
   width: calc(100% + 4px);
   height: 42px;
-  margin: 0 -2px;
+  margin: 4px -2px;
+  box-sizing: border-box;
   padding: 0 10px 0 8px;
   border: none;
   border-radius: 12px;
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
+  font-size: 14px;
+  line-height: 22px;
   cursor: pointer;
+  overflow: hidden;
 }
 
 .footerButton:hover,
@@ -34,24 +25,28 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
-.footerRail .footerButton {
+.footerButtonRail {
   justify-content: center;
+  gap: 0;
   width: 36px;
   height: 36px;
-  margin: 0;
+  margin: 8px 0 0;
   padding: 0;
   border-radius: 50%;
 }
 
-.bookIcon {
+.footerIcon {
+  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   font-size: 16px;
-  line-height: 18px;
+  line-height: 16px;
 }
+
+.footerButtonRail .footerIcon { width: 18px; height: 18px; font-size: 18px; line-height: 18px; }
 
 .footerLabel {
   flex: 1;
@@ -65,7 +60,7 @@
 .sidebarHealthDot[data-state='ok'] { background: #1ca46f; box-shadow: 0 0 0 2px color-mix(in srgb, #1ca46f 14%, transparent); }
 .sidebarHealthDot[data-state='warning'] { background: #e5a21a; box-shadow: 0 0 0 2px color-mix(in srgb, #e5a21a 14%, transparent); }
 .sidebarHealthDot[data-state='error'] { background: var(--dsw-alias-label-error); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsw-alias-label-error) 14%, transparent); }
-.footerRail .sidebarHealthDot { position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; }
+.footerButtonRail .sidebarHealthDot { position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; }
 
 .cangzhiMark {
   display: inline-grid;
@@ -80,10 +75,6 @@
   line-height: 1;
   box-shadow: 0 3px 10px color-mix(in srgb, var(--dsw-alias-brand-primary) 24%, transparent);
 }
-
-.cangzhiBrandName { display: inline-flex; align-items: baseline; gap: 6px; color: var(--dsw-alias-label-primary); }
-.cangzhiBrandName strong { font-size: 15px; font-weight: 650; }
-.cangzhiBrandName small { color: var(--dsw-alias-label-tertiary); font-size: 9px; letter-spacing: .08em; }
 
 .homeIntegration {
   width: 100%;

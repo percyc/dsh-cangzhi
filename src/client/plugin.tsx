@@ -198,26 +198,6 @@ function CangzhiMark({ size, className }: { size: number; className?: string }) 
   return <span className={`${css.cangzhiMark} ${className ?? ''}`} style={{ width: size, height: size, fontSize: Math.max(13, size * .55) }}>知</span>
 }
 
-function CangzhiBrandName() {
-  return <span className={css.cangzhiBrandName}><strong>藏知</strong><small>DSH</small></span>
-}
-
-function CangzhiDocumentTitle() {
-  useEffect(() => {
-    const update = () => {
-      const next = document.title
-        .replace(/DSH Local Build$/u, '藏知 DSH')
-        .replace(/DSH 本地构建$/u, '藏知 DSH')
-      if (next !== document.title) document.title = next
-    }
-    update()
-    const observer = new MutationObserver(update)
-    observer.observe(document.head, { childList: true, subtree: true, characterData: true })
-    return () => { observer.disconnect() }
-  }, [])
-  return null
-}
-
 function setWorkspaceCookie(slug: string): void {
   document.cookie = `cangzhi_workspace=${encodeURIComponent(slug)}; Path=/; Max-Age=31536000; SameSite=Lax`
 }
@@ -560,20 +540,18 @@ function ConsoleAction({ wide, useCangzhiConsole, openConsole, t }: ConsoleActio
   }, [])
   const healthLabel = health === 'ok' ? t('healthOk') : health === 'warning' ? t('healthWarning') : health === 'error' ? t('healthError') : t('healthChecking')
   return (
-    <div className={wide ? css.footer : `${css.footer} ${css.footerRail}`}>
-      <button
-        type="button"
-        className={css.footerButton}
-        data-active={String(state.open)}
-        aria-label={t('consoleTitle')}
-        title={`${t('consoleTitle')} · ${healthLabel}`}
-        onClick={openConsole}
-      >
-        <span className={css.bookIcon} aria-hidden>▤</span>
-        {wide && <span className={css.footerLabel}>{t('footer')}</span>}
-        <span className={css.sidebarHealthDot} data-state={health} aria-hidden />
-      </button>
-    </div>
+    <button
+      type="button"
+      className={wide ? css.footerButton : `${css.footerButton} ${css.footerButtonRail}`}
+      data-active={String(state.open)}
+      aria-label={t('consoleTitle')}
+      title={`${t('consoleTitle')} · ${healthLabel}`}
+      onClick={openConsole}
+    >
+      <span className={css.footerIcon} aria-hidden>▤</span>
+      {wide && <span className={css.footerLabel}>{t('footer')}</span>}
+      <span className={css.sidebarHealthDot} data-state={health} aria-hidden />
+    </button>
   )
 }
 
@@ -1281,18 +1259,6 @@ export function apply(ctx: ClientContext): void {
     settingsScope: ctx.settingsScope.bind<ConnectionSettings>({ namespace: NS }),
   }
 
-  ctx.slots.inject('sidebar.brand.mark', () => ctx.slots.register({
-    name: 'sidebar.brand.mark', id: 'cangzhi-brand-mark', order: 0,
-  }, CangzhiMark))
-
-  ctx.slots.inject('sidebar.brand.name', () => ctx.slots.register({
-    name: 'sidebar.brand.name', id: 'cangzhi-brand-name', order: 0,
-  }, CangzhiBrandName))
-
-  ctx.slots.inject('conversation.hero.brand.mark', () => ctx.slots.register({
-    name: 'conversation.hero.brand.mark', id: 'cangzhi-hero-mark', order: 0,
-  }, CangzhiMark))
-
   ctx.slots.inject('conversation.hero.context', () => ctx.slots.register({
     name: 'conversation.hero.context', id: 'cangzhi-home', order: 10,
     inject: () => consoleFace,
@@ -1337,10 +1303,6 @@ export function apply(ctx: ClientContext): void {
     name: 'shell.overlay', id: 'cangzhi-knowledge-workbench', order: 90,
     inject: () => consoleFace,
   }, KnowledgeWorkbench))
-
-  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
-    name: 'shell.overlay', id: 'cangzhi-document-title', order: -100,
-  }, CangzhiDocumentTitle))
 
   ctx.slots.inject('tool.call.toolview', function* () {
     for (const rawName of RAW_TOOLS) {
