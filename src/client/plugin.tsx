@@ -1,6 +1,7 @@
 /** Browser half: full Cangzhi console plus replay-stable MCP tool cards. */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -8,7 +9,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import css from './Cangzhi.module.css'
 
 const NS = 'cangzhi'
@@ -47,6 +49,28 @@ const zh = {
   healthOk: '藏知服务正常',
   healthWarning: '藏知有项目需要处理',
   healthError: '藏知服务异常',
+  settingsTab: '藏知',
+  settingsTitle: '藏知连接',
+  settingsDescription: '配置 DSH 使用的藏知服务地址和默认知识空间。访问令牌仍由 DSH 凭据存储单独管理。',
+  settingsApiUrl: 'API 地址',
+  settingsApiHint: '藏知 REST API 与 MCP 服务的基础地址。',
+  settingsWebUrl: 'Web 地址',
+  settingsWebHint: '藏知管理页面的基础地址。',
+  settingsWorkspace: '默认知识空间',
+  settingsWorkspaceHint: 'DSH 启动时使用的空间标识；当前空间仍可在会话中切换。',
+  settingsManaged: '由管理员环境变量锁定',
+  settingsRestart: '保存后需要重启 DSH 才会切换连接。',
+  settingsRestartPending: '配置已保存，当前进程仍在使用旧连接，请重启 DSH。',
+  settingsSave: '保存配置',
+  settingsSaving: '正在保存…',
+  settingsSaved: '配置已保存。',
+  settingsTest: '测试连接',
+  settingsTesting: '正在测试…',
+  settingsTestOk: '藏知 API 连接正常。',
+  settingsTestFailed: '连接测试失败',
+  settingsInvalidUrl: '请输入不含账号密码的绝对 HTTP(S) 地址。',
+  settingsInvalidWorkspace: '空间标识只能使用小写字母、数字和连字符，最长 64 个字符。',
+  settingsUnavailable: '当前 DSH 未提供可写的设置存储。',
   tools: {
     knowledge_list_scopes: '知识范围',
     knowledge_list_facets: '知识分类',
@@ -80,6 +104,28 @@ const en = {
   healthOk: 'Cangzhi services are healthy',
   healthWarning: 'Cangzhi needs attention',
   healthError: 'Cangzhi services are unavailable',
+  settingsTab: 'Cangzhi',
+  settingsTitle: 'Cangzhi connection',
+  settingsDescription: 'Configure the Cangzhi services and default workspace used by DSH. Access tokens remain in the separate DSH credential store.',
+  settingsApiUrl: 'API URL',
+  settingsApiHint: 'Base URL for the Cangzhi REST API and MCP service.',
+  settingsWebUrl: 'Web URL',
+  settingsWebHint: 'Base URL for the Cangzhi management site.',
+  settingsWorkspace: 'Default workspace',
+  settingsWorkspaceHint: 'Workspace slug used when DSH starts; the active workspace can still be changed in a conversation.',
+  settingsManaged: 'Locked by an administrator environment variable',
+  settingsRestart: 'Restart DSH after saving to activate the new connection.',
+  settingsRestartPending: 'Settings are saved, but this process still uses the old connection. Restart DSH.',
+  settingsSave: 'Save settings',
+  settingsSaving: 'Saving…',
+  settingsSaved: 'Settings saved.',
+  settingsTest: 'Test connection',
+  settingsTesting: 'Testing…',
+  settingsTestOk: 'The Cangzhi API is reachable.',
+  settingsTestFailed: 'Connection test failed',
+  settingsInvalidUrl: 'Enter an absolute HTTP(S) URL without a username or password.',
+  settingsInvalidWorkspace: 'Use lowercase letters, numbers, and hyphens, up to 64 characters.',
+  settingsUnavailable: 'This DSH instance does not provide writable settings storage.',
   tools: {
     knowledge_list_scopes: 'Knowledge scopes',
     knowledge_list_facets: 'Knowledge facets',
@@ -96,6 +142,14 @@ const en = {
     knowledge_get_evidence_by_dataset: 'Dataset evidence',
     knowledge_preview_evidence_rows: 'Preview evidence',
   },
+}
+
+type CangzhiLocaleKey = Exclude<keyof typeof zh, 'tools'> | `tools.${keyof typeof zh.tools}`
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    cangzhi: CangzhiLocaleKey
+  }
 }
 
 interface ConsoleSnapshot {
@@ -350,6 +404,130 @@ function ConversationKnowledgeHeader({ openKnowledge }: ConversationKnowledgeHea
   return <div className={css.conversationKnowledgeHeader} title="页面与模型工具会同步切换知识空间"><CangzhiMark size={18}/><i data-ok={String(configured)}/><span>知识空间</span><select value={current.slug} disabled={busy} onChange={event => void change(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select><button aria-label="搜索藏知资料" onClick={openKnowledge}>⌕</button></div>
 }
 
+type ConnectionSettings = { apiUrl: string; webUrl: string; defaultWorkspace: string }
+type ConnectionLocks = { apiUrl: boolean; webUrl: boolean; defaultWorkspace: boolean }
+type ConnectionSettingsStatus = {
+  active: ConnectionSettings
+  configured: ConnectionSettings
+  locks: ConnectionLocks
+  restartRequired: boolean
+}
+
+interface CangzhiSettingsFace {
+  settingsScope: SettingsScope<ConnectionSettings>
+}
+
+type CangzhiSettingsTabProps = PropsRuntime<'settings.plugins.tab'>
+  & PropsLocale<typeof NS> & InjectFace<CangzhiSettingsFace>
+
+function validConnectionUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return (url.protocol === 'http:' || url.protocol === 'https:')
+      && url.username === '' && url.password === ''
+  } catch {
+    return false
+  }
+}
+
+function CangzhiSettingsTab({ settingsScope, t }: CangzhiSettingsTabProps) {
+  const snapshot = useSyncExternalStore(
+    listener => settingsScope.subscribe(listener),
+    () => settingsScope.getSnapshot(),
+  )
+  const [status, setStatus] = useState<ConnectionSettingsStatus | null>(null)
+  const [apiUrl, setApiUrl] = useState('')
+  const [webUrl, setWebUrl] = useState('')
+  const [defaultWorkspace, setDefaultWorkspace] = useState('default')
+  const [busy, setBusy] = useState<'save' | 'test' | null>(null)
+  const [message, setMessage] = useState('')
+
+  const loadStatus = async () => {
+    const response = await fetch('/_cangzhi-plugin/status', { cache: 'no-store' })
+    if (!response.ok) throw new Error(await errorMessage(response, t('settingsUnavailable')))
+    const plugin = await response.json() as PluginStatus
+    if (plugin.connectionSettings !== undefined) setStatus(plugin.connectionSettings)
+  }
+
+  useEffect(() => {
+    if (snapshot.value === undefined) return
+    setApiUrl(snapshot.value.apiUrl)
+    setWebUrl(snapshot.value.webUrl)
+    setDefaultWorkspace(snapshot.value.defaultWorkspace)
+  }, [snapshot.value])
+  useEffect(() => { void loadStatus().catch(() => { setMessage(t('settingsUnavailable')) }) }, [])
+
+  const validate = (): boolean => {
+    if (!validConnectionUrl(apiUrl) || !validConnectionUrl(webUrl)) {
+      setMessage(t('settingsInvalidUrl'))
+      return false
+    }
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(defaultWorkspace.trim().toLowerCase())) {
+      setMessage(t('settingsInvalidWorkspace'))
+      return false
+    }
+    return true
+  }
+
+  const test = async () => {
+    if (!validate()) return
+    setBusy('test'); setMessage('')
+    try {
+      const response = await fetch('/_cangzhi-plugin/settings/test', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ apiUrl, webUrl, defaultWorkspace }),
+      })
+      setMessage(response.ok ? t('settingsTestOk') : await errorMessage(response, t('settingsTestFailed')))
+    } catch { setMessage(t('settingsTestFailed')) }
+    finally { setBusy(null) }
+  }
+
+  const save = async () => {
+    if (!validate() || snapshot.status !== 'ready' || !snapshot.writable) return
+    setBusy('save'); setMessage('')
+    const locks = status?.locks
+    const ops = [
+      ...(locks?.apiUrl ? [] : [{ op: 'set' as const, path: ['apiUrl'], value: apiUrl.trim() }]),
+      ...(locks?.webUrl ? [] : [{ op: 'set' as const, path: ['webUrl'], value: webUrl.trim() }]),
+      ...(locks?.defaultWorkspace ? [] : [{
+        op: 'set' as const, path: ['defaultWorkspace'], value: defaultWorkspace.trim().toLowerCase(),
+      }]),
+    ]
+    try {
+      if (ops.length > 0) await settingsScope.mutate(ops, snapshot.revision)
+      await loadStatus()
+      setMessage(t('settingsSaved'))
+    } catch { setMessage(t('settingsUnavailable')) }
+    finally { setBusy(null) }
+  }
+
+  const locks = status?.locks
+  const unavailable = status === null || snapshot.status !== 'ready' || !snapshot.writable
+  const field = (
+    key: keyof ConnectionSettings,
+    label: string,
+    hint: string,
+    value: string,
+    update: (value: string) => void,
+  ) => {
+    const locked = locks?.[key] ?? false
+    return <label className={css.settingsField}><span><strong>{label}</strong>{locked && <em>{t('settingsManaged')}</em>}</span><input value={value} disabled={unavailable || locked || busy !== null} onChange={event => update(event.target.value)}/><small>{hint}</small></label>
+  }
+
+  return <section className={css.settingsPanel}>
+    <header><CangzhiMark size={36}/><div><h3>{t('settingsTitle')}</h3><p>{t('settingsDescription')}</p></div></header>
+    <div className={css.settingsFields}>
+      {field('apiUrl', t('settingsApiUrl'), t('settingsApiHint'), apiUrl, setApiUrl)}
+      {field('webUrl', t('settingsWebUrl'), t('settingsWebHint'), webUrl, setWebUrl)}
+      {field('defaultWorkspace', t('settingsWorkspace'), t('settingsWorkspaceHint'), defaultWorkspace, setDefaultWorkspace)}
+    </div>
+    <p className={css.settingsRestart} data-pending={String(Boolean(status?.restartRequired))}>{status?.restartRequired ? t('settingsRestartPending') : t('settingsRestart')}</p>
+    {unavailable && <p className={css.settingsMessage}>{t('settingsUnavailable')}</p>}
+    {message && <p className={css.settingsMessage} role="status">{message}</p>}
+    <footer><button disabled={unavailable || busy !== null} onClick={() => void test()}>{busy === 'test' ? t('settingsTesting') : t('settingsTest')}</button><button data-primary="true" disabled={unavailable || busy !== null} onClick={() => void save()}>{busy === 'save' ? t('settingsSaving') : t('settingsSave')}</button></footer>
+  </section>
+}
+
 type ConsoleActionProps = PropsRuntime<'sidebar.footer.action'>
   & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
@@ -412,7 +590,7 @@ type DocumentItem = {
   current_version?: { processing_status: string } | null
   pipeline?: { overall_status: string } | null
 }
-type PluginStatus = { apiConnected?: boolean; mcpConfigured: boolean; toolCount: number; activeWorkspace?: string }
+type PluginStatus = { apiConnected?: boolean; mcpConfigured: boolean; toolCount: number; activeWorkspace?: string; connectionSettings?: ConnectionSettingsStatus }
 type SystemStatus = {
   status: 'ok' | 'degraded'
   uptime_seconds: number
@@ -423,9 +601,10 @@ type SystemStatus = {
 type Tab = 'overview' | 'search' | 'documents' | 'create' | 'upload' | 'categories' | 'spaces' | 'connect'
 
 async function errorMessage(response: Response, fallback: string): Promise<string> {
-  const value = await response.json().catch(() => null) as { detail?: string | { message?: string } } | null
+  const value = await response.json().catch(() => null) as { detail?: string | { message?: string }; error?: string } | null
   if (typeof value?.detail === 'string') return value.detail
   if (typeof value?.detail === 'object' && typeof value.detail.message === 'string') return value.detail.message
+  if (typeof value?.error === 'string') return value.error
   return fallback
 }
 
@@ -1093,11 +1272,14 @@ function CangzhiToolCard({ toolName, block, inspect, t }: CangzhiToolProps) {
   )
 }
 
-export const inject = ['slots', 'locale']
+export const inject = ['slots', 'locale', 'settingsScope']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'cangzhi: dictionaries')
   const consoleFace = createConsoleFace()
+  const settingsFace: CangzhiSettingsFace = {
+    settingsScope: ctx.settingsScope.bind<ConnectionSettings>({ namespace: NS }),
+  }
 
   ctx.slots.inject('sidebar.brand.mark', () => ctx.slots.register({
     name: 'sidebar.brand.mark', id: 'cangzhi-brand-mark', order: 0,
@@ -1133,6 +1315,15 @@ export function apply(ctx: ClientContext): void {
     locale: NS,
     inject: () => consoleFace,
   }, ConsoleAction))
+
+  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
+    name: 'settings.plugins.tab',
+    id: 'cangzhi',
+    order: 5,
+    label: () => ctx.locale.bind(NS)('settingsTab'),
+    locale: NS,
+    inject: () => settingsFace,
+  }, CangzhiSettingsTab))
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',

@@ -111,7 +111,21 @@ DSH 会在 `$DSH_HOME/profiles/web`（默认 `~/.dsh/profiles/web`）维护 Prof
 
 ## 7. 配置藏知连接
 
-推荐把机器级配置保存到 `$DSH_HOME/.env`。没有显式设置 `DSH_HOME` 时使用 `~/.dsh/.env`：
+插件支持两级配置，优先级如下：
+
+1. 显式环境变量：机器级配置，并在 DSH 设置页锁定对应字段；
+2. DSH 原生设置：适合个人、开发和单实例环境，保存在 `$DSH_HOME/settings.yaml`；
+3. 插件默认值：首次启动时提供本机地址和 `default` 空间。
+
+### 方式 A：在 DSH 中配置
+
+不要设置 `CANGZHI_API_URL`、`CANGZHI_WEB_URL` 和 `CANGZHI_WORKSPACE`，启动 DSH 后进入“设置 → 插件 → 藏知”。填写服务地址与默认空间，点击“测试连接”，保存并重启 DSH。
+
+页面不会管理 MCP 监听端口或 PAT：端口属于进程部署配置，PAT 由 DSH credentials 单独保管。
+
+### 方式 B：由部署环境锁定
+
+生产、容器、多实例或统一运维环境推荐把机器级配置保存到 `$DSH_HOME/.env`。没有显式设置 `DSH_HOME` 时使用 `~/.dsh/.env`：
 
 ```dotenv
 CANGZHI_API_URL=http://127.0.0.1:8000
@@ -135,7 +149,9 @@ CANGZHI_WORKSPACE=default
 - URL 中不能包含用户名或密码；
 - `CANGZHI_DSH_MCP_PORT` 必须是 `1024` 到 `65535` 之间的空闲端口；
 - `CANGZHI_WORKSPACE` 只能包含小写字母、数字和连字符，最长 64 个字符；
-- 不要在 `.env` 中配置藏知 PAT，PAT 由首次连接流程写入 DSH credentials。
+- 显式设置服务 URL 或默认空间后，DSH 设置页会显示“由管理员环境变量锁定”且不可编辑；
+- 修改 `.env` 后必须重启 DSH；在设置页保存配置同样需要重启；
+- 不要在 `.env` 或 `settings.yaml` 中配置藏知 PAT，PAT 由首次连接流程写入 DSH credentials。
 
 限制 `.env` 的读取权限：
 

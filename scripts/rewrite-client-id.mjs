@@ -14,5 +14,12 @@ for (const path of ['lib/client.js', 'lib/client.js.map']) {
   if (path === 'lib/client.js' && !source.includes(FROM) && !source.includes(TO)) {
     throw new Error(`${path} does not contain the expected temporary client id`)
   }
-  if (source.includes(FROM)) await writeFile(path, source.replaceAll(FROM, TO))
+  let rewritten = source.replaceAll(FROM, TO)
+  if (path === 'lib/client.js') {
+    rewritten = rewritten.replace(
+      /^(\s*\/\/#region )\\0dsh-css:.*\/src\/client\/([^/\n]+\.module\.css\.mjs)$/gm,
+      '$1bundled stylesheet $2',
+    )
+  }
+  if (rewritten !== source) await writeFile(path, rewritten)
 }

@@ -10,7 +10,7 @@ DSH 基座只提供通用扩展槽位。`conversation.hero.context` 属于通用
 
 - Host：`src/index.ts` 注册同源 Web/API 网关、控制接口、系统提示和回环 MCP 凭据代理。
 - Client：`src/client/plugin.tsx` 提供首页接入、知识空间切换、管理中心、知识工作台和 MCP 结果卡片。
-- 配置：`cordis.patch.yml` 只读取公开服务 URL、内部 MCP 端口和默认空间。
+- 配置：服务 URL 与默认空间注册到 DSH 原生设置；显式环境变量覆盖并锁定对应字段；内部 MCP 端口只从部署环境读取。
 - 构建：`tsdown.config.ts` 通过 `DSH_SOURCE` 使用 DSH 的 Client preset；产物保存在 `lib/`。
 - 安装：`scripts/setup-dsh.sh` 仅构建本项目并安装到指定 Profile，不再构建或修改 DSH。
 - 开发启动：`scripts/start-dev-dsh.sh` 是可选辅助脚本，不负责启动或修改藏知。
@@ -46,6 +46,7 @@ npm run check
 5. `mcp__cangzhi__knowledge_search` 能返回当前空间结果；
 6. 切换空间后下一次 MCP 调用使用新空间；
 7. PAT 断开后 MCP 返回未配置，不泄漏历史 token。
+8. 未设置连接环境变量时，可在“设置 → 插件 → 藏知”保存配置，重启后生效；显式设置环境变量时对应字段只读。
 
 ## 已知限制
 

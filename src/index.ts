@@ -2,20 +2,37 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { createServer } from 'node:http'
+import Schema from '@deepseek-ai/schemastery'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { SettingsNamespace, SettingsScope } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { createProxyHandler } from './proxy.ts'
 
 export const name = 'cangzhi'
-export const inject = ['systemPrompt', 'webServer', 'connection', 'credentials']
+export const inject = ['systemPrompt', 'webServer', 'connection', 'credentials', 'settings']
 
 export interface Config {
   webUrl: string
   apiUrl: string
   internalMcpPort?: number
   defaultWorkspace?: string
+  lockApiUrl?: boolean
+  lockWebUrl?: boolean
+  lockDefaultWorkspace?: boolean
+}
+
+interface ConnectionSettings {
+  apiUrl: string
+  webUrl: string
+  defaultWorkspace: string
+}
+
+interface ConnectionLocks {
+  apiUrl: boolean
+  webUrl: boolean
+  defaultWorkspace: boolean
 }
 
 const TOKEN_REF = 'CANGZHI_TOKEN' as CredentialRef
@@ -24,6 +41,12 @@ const API_ROUTE_PREFIX = '/_dsh-cangzhi-api'
 const CONTROL_ROUTE_PREFIX = '/_cangzhi-plugin'
 const DEFAULT_MCP_PORT = 3081
 const WORKSPACE_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/
+const SETTINGS_NAMESPACE = 'cangzhi' as SettingsNamespace
+const ConnectionSettingsSchema: Schema<ConnectionSettings> = Schema.object({
+  apiUrl: Schema.string(),
+  webUrl: Schema.string(),
+  defaultWorkspace: Schema.string(),
+})
 
 function upstreamUrl(value: string, name: string): string {
   let url: URL
@@ -51,6 +74,59 @@ function mcpPort(value: number | undefined): number {
   return port
 }
 
+function apiEndpoint(apiUrl: string, path: string): URL {
+  const target = new URL(apiUrl)
+  target.pathname = `${target.pathname.replace(/\/$/, '')}/${path.replace(/^\//, '')}`
+  return target
+}
+
+function normalizeConnectionSettings(value: ConnectionSettings): ConnectionSettings {
+  const defaultWorkspace = value.defaultWorkspace.trim().toLowerCase()
+  if (!WORKSPACE_SLUG.test(defaultWorkspace)) {
+    throw new Error('defaultWorkspace is not a valid Cangzhi workspace slug')
+  }
+  return {
+    apiUrl: upstreamUrl(value.apiUrl, 'apiUrl'),
+    webUrl: upstreamUrl(value.webUrl, 'webUrl'),
+    defaultWorkspace,
+  }
+}
+
+function resolveConnectionSettings(
+  config: Config,
+  stored: ConnectionSettings,
+  locks: ConnectionLocks,
+): ConnectionSettings {
+  return normalizeConnectionSettings({
+    apiUrl: locks.apiUrl ? config.apiUrl : stored.apiUrl,
+    webUrl: locks.webUrl ? config.webUrl : stored.webUrl,
+    defaultWorkspace: locks.defaultWorkspace
+      ? (config.defaultWorkspace ?? 'default')
+      : stored.defaultWorkspace,
+  })
+}
+
+function connectionSettingsEqual(left: ConnectionSettings, right: ConnectionSettings): boolean {
+  return left.apiUrl === right.apiUrl
+    && left.webUrl === right.webUrl
+    && left.defaultWorkspace === right.defaultWorkspace
+}
+
+function settingsStatus(
+  scope: SettingsScope<ConnectionSettings>,
+  active: ConnectionSettings,
+  config: Config,
+  locks: ConnectionLocks,
+) {
+  const configured = resolveConnectionSettings(config, scope.get(), locks)
+  return {
+    active,
+    configured,
+    locks,
+    restartRequired: !connectionSettingsEqual(active, configured),
+  }
+}
+
 async function jsonBody(req: import('node:http').IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
   let size = 0
@@ -73,13 +149,30 @@ The Cangzhi button in the DSH sidebar opens a native DSH knowledge workspace for
 The active Cangzhi workspace selected in the UI is also the workspace used by every model tool. Never claim to search another workspace unless the user switches it in the Cangzhi workspace selector first.`
 
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  const webUrl = upstreamUrl(config.webUrl, 'webUrl')
-  const apiUrl = upstreamUrl(config.apiUrl, 'apiUrl')
-  const internalMcpPort = mcpPort(config.internalMcpPort)
-  let activeWorkspaceSlug = (config.defaultWorkspace ?? 'default').trim().toLowerCase()
-  if (!WORKSPACE_SLUG.test(activeWorkspaceSlug)) {
-    throw new Error('defaultWorkspace is not a valid Cangzhi workspace slug')
+  const baseSettings = normalizeConnectionSettings({
+    apiUrl: config.apiUrl,
+    webUrl: config.webUrl,
+    defaultWorkspace: config.defaultWorkspace ?? 'default',
+  })
+  const locks: ConnectionLocks = {
+    apiUrl: config.lockApiUrl ?? false,
+    webUrl: config.lockWebUrl ?? false,
+    defaultWorkspace: config.lockDefaultWorkspace ?? false,
   }
+  const connectionSettings = ctx.settings.register(
+    SETTINGS_NAMESPACE,
+    ConnectionSettingsSchema,
+    {
+      base: baseSettings,
+      applies: 'restart',
+      validate: value => { normalizeConnectionSettings(value) },
+    },
+  )
+  const activeConnection = resolveConnectionSettings(config, connectionSettings.get(), locks)
+  const webUrl = activeConnection.webUrl
+  const apiUrl = activeConnection.apiUrl
+  const internalMcpPort = mcpPort(config.internalMcpPort)
+  let activeWorkspaceSlug = activeConnection.defaultWorkspace
   const webProxy = createProxyHandler(webUrl, { allowFrames: true })
   const apiProxy = createProxyHandler(apiUrl, {
     stripPrefix: API_ROUTE_PREFIX,
@@ -163,6 +256,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         mcpConfigured: credential.configured,
         toolCount: 14,
         activeWorkspace: activeWorkspaceSlug,
+        connectionSettings: settingsStatus(connectionSettings, activeConnection, config, locks),
       }))
     },
   }), 'cangzhi plugin status')
@@ -177,7 +271,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         const body = await jsonBody(req)
         const slug = typeof body.slug === 'string' ? body.slug.trim().toLowerCase() : ''
         if (!WORKSPACE_SLUG.test(slug)) throw new Error('知识空间标识格式无效')
-        const validationUrl = new URL(`/api/workspaces/${encodeURIComponent(slug)}`, apiUrl)
+        const validationUrl = apiEndpoint(apiUrl, `/api/workspaces/${encodeURIComponent(slug)}`)
         const cookie = req.headers.cookie
         const validation = await fetch(validationUrl, {
           headers: cookie === undefined ? {} : { cookie },
@@ -216,7 +310,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         const body = await jsonBody(req)
         const token = typeof body.token === 'string' ? body.token.trim() : ''
         if (token.length < 20 || token.length > 4096) throw new Error('访问令牌格式无效')
-        const validationUrl = new URL('/api/v1/knowledge/scopes', apiUrl)
+        const validationUrl = apiEndpoint(apiUrl, '/api/v1/knowledge/scopes')
         const validation = await fetch(validationUrl, { headers: {
           authorization: `Bearer ${token}`,
           'x-cangzhi-workspace': activeWorkspaceSlug,
@@ -231,4 +325,35 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'cangzhi token setup')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: `${CONTROL_ROUTE_PREFIX}/settings/test`,
+    handler: async (req, res) => {
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+      try {
+        const body = await jsonBody(req)
+        const current = connectionSettings.get()
+        const candidate = resolveConnectionSettings(config, {
+          apiUrl: typeof body.apiUrl === 'string' ? body.apiUrl : current.apiUrl,
+          webUrl: typeof body.webUrl === 'string' ? body.webUrl : current.webUrl,
+          defaultWorkspace: typeof body.defaultWorkspace === 'string'
+            ? body.defaultWorkspace
+            : current.defaultWorkspace,
+        }, locks)
+        const readinessUrl = apiEndpoint(candidate.apiUrl, '/api/readiness')
+        const readiness = await fetch(readinessUrl, { signal: AbortSignal.timeout(5_000) })
+        if (!readiness.ok) throw new Error(`藏知 API readiness 返回 HTTP ${String(readiness.status)}`)
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify({ ok: true, apiUrl: candidate.apiUrl }))
+      } catch (error) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+      }
+    },
+  }), 'cangzhi connection settings test')
 }

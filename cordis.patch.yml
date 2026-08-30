@@ -10,6 +10,12 @@
         apiUrl: !!js process.env.CANGZHI_API_URL ?? 'http://127.0.0.1:8000'
         internalMcpPort: !!js Number(process.env.CANGZHI_DSH_MCP_PORT ?? '3081')
         defaultWorkspace: !!js process.env.CANGZHI_WORKSPACE ?? 'default'
+        # Explicit deployment values lock their matching fields in the DSH
+        # settings page. Unset values remain user-editable and persist through
+        # the native DSH settings provider.
+        lockApiUrl: !!js process.env.CANGZHI_API_URL !== undefined
+        lockWebUrl: !!js process.env.CANGZHI_WEB_URL !== undefined
+        lockDefaultWorkspace: !!js process.env.CANGZHI_WORKSPACE !== undefined
 
     - id: cangzhi-mcp
       name: '@deepseek-ai/dsh-mcp-client'

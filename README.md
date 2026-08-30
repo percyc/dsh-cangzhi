@@ -22,7 +22,7 @@ DSH 浏览器
        └─ DSH 凭据存储 ──> 回环 MCP 代理 ──> 藏知 /api/mcp
 ```
 
-公开连接配置只有服务地址、内部回环端口和默认知识空间。`/_cangzhi`、`/_dsh-cangzhi-api` 与 `/_cangzhi-plugin` 是适配器内部协议路径，不作为部署参数，避免 Host 与 Client 配置不一致。
+公开连接配置只有服务地址、内部回环端口和默认知识空间。服务地址与默认知识空间可在 DSH 原生设置中维护；部署环境变量可覆盖并锁定对应项目。`/_cangzhi`、`/_dsh-cangzhi-api` 与 `/_cangzhi-plugin` 是适配器内部协议路径，不作为部署参数，避免 Host 与 Client 配置不一致。
 
 ## 前置条件
 
@@ -64,16 +64,18 @@ export DSH_PROFILE=web
 
 ## 配置
 
-`cordis.patch.yml` 从启动环境读取以下配置：
+安装后进入“设置 → 插件 → 藏知”，可以配置 API 地址、Web 地址和默认知识空间。这些值由 DSH 原生设置服务持久化到 `$DSH_HOME/settings.yaml`，保存后重启 DSH 生效；页面中的“测试连接”只检查候选 API，不会修改配置。
+
+部署环境仍可通过以下变量提供机器级配置：
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `CANGZHI_API_URL` | `http://127.0.0.1:8000` | 藏知 API 地址 |
-| `CANGZHI_WEB_URL` | `http://127.0.0.1:3000` | 藏知 Web 地址 |
+| `CANGZHI_API_URL` | `http://127.0.0.1:8000` | 藏知 API 地址；显式设置后锁定页面字段 |
+| `CANGZHI_WEB_URL` | `http://127.0.0.1:3000` | 藏知 Web 地址；显式设置后锁定页面字段 |
 | `CANGZHI_DSH_MCP_PORT` | `3081` | 仅回环监听的凭据代理端口 |
-| `CANGZHI_WORKSPACE` | `default` | DSH 启动时的默认知识空间 |
+| `CANGZHI_WORKSPACE` | `default` | 默认知识空间；显式设置后锁定页面字段 |
 
-生产环境建议显式设置两个服务 URL：
+建议个人或开发环境不设置三个可编辑变量，直接使用 DSH 设置页；生产、容器和多实例部署则显式设置它们，使配置可审计且不会被页面修改：
 
 ```bash
 export CANGZHI_API_URL=https://knowledge-api.example.com
@@ -82,7 +84,7 @@ export CANGZHI_DSH_MCP_PORT=3081
 export CANGZHI_WORKSPACE=default
 ```
 
-不要把藏知 PAT 写入这些环境变量，也不要让 DSH MCP 客户端绕过适配器直连藏知。首次在 DSH 页面执行“登录并连接”后，适配器会创建只读/检索权限 PAT，并存入 DSH 的 `CANGZHI_TOKEN` 凭据项。
+`CANGZHI_DSH_MCP_PORT` 始终是部署参数，不出现在设置页。不要把藏知 PAT 写入环境变量或 `settings.yaml`，也不要让 DSH MCP 客户端绕过适配器直连藏知。首次在 DSH 页面执行“登录并连接”后，适配器会创建只读/检索权限 PAT，并存入 DSH 的 `CANGZHI_TOKEN` 凭据项。
 
 ## 本地源码开发
 
