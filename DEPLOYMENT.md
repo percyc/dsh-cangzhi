@@ -281,6 +281,8 @@ pnpm dsh web
 
 开发环境可以使用本地目录；生产环境应安装带 tag 或 commit SHA 的 Git 版本。
 
+插件目录不需要单独下载 DSH peer packages。仓库中的 `pnpm-workspace.yaml` 已设置 `autoInstallPeers: false`；不要删除该设置，也不要把 DSH 的预发布依赖改为从 npm 强制安装。
+
 ## 14. 常见故障
 
 ### Git 安装提示无权限
@@ -325,6 +327,24 @@ pnpm dsh web --dump-config
 ```
 
 确认安装正常后，可以删除备份目录 `node_modules.from-old-machine`。这些操作只重建 Profile 的插件依赖，不会删除 DSH credentials、DSH 设置或藏知数据。
+
+### 插件目录提示 `ERR_PNPM_NO_MATCHING_VERSION`
+
+如果缺少的是 `@deepseek-ai/dsh-*@0.1.2-alpha.1`，说明 pnpm 正在错误地尝试下载应由 DSH Profile 提供的 peer packages。确认插件仓库包含以下文件后重新安装：
+
+```yaml
+# pnpm-workspace.yaml
+packages:
+  - .
+autoInstallPeers: false
+```
+
+```bash
+cd /path/to/dsh-cangzhi
+pnpm install
+```
+
+不要只把某一个 peer dependency 改成镜像中较新的 alpha 版本；插件声明应与目标 DSH 版本保持一致。
 
 ### DSH 启动时报端口占用
 

@@ -62,6 +62,8 @@ export DSH_PROFILE=web
 
 该脚本只构建和安装适配器，不修改、不重编译 DSH 基座。
 
+插件仓库的 `pnpm install` 已关闭 peer 自动安装。`@deepseek-ai/dsh-*` 运行包由目标 DSH Profile 提供，不应在插件目录中从 npm 单独安装。
+
 ## 配置
 
 安装后进入“设置 → 插件 → 藏知”，可以配置 API 地址、Web 地址和默认知识空间。这些值由 DSH 原生设置服务持久化到 `$DSH_HOME/settings.yaml`，保存后重启 DSH 生效；页面中的“测试连接”只检查候选 API，不会修改配置。

@@ -1,0 +1,7 @@
+packages:
+  - .
+
+# DSH runtime packages are optional peers supplied by the selected DSH
+# profile. Installing this standalone adapter must not fetch a second copy,
+# especially when a matching DSH prerelease is no longer present on npm.
+autoInstallPeers: false
