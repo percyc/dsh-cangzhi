@@ -291,6 +291,26 @@ pnpm dsh web
 
 重新执行 `pnpm dsh plugin --profile web add ...`，然后运行 `pnpm dsh web --dump-config`。确认插件仓库根目录包含 `package.json`，且其中声明了 `dsh.bundle.patch`。
 
+### pnpm 报 `ERR_PNPM_UNEXPECTED_STORE`
+
+这表示 Profile 的 `node_modules` 由另一个 pnpm store 或不同主版本创建。不要为了兼容临时目录而修改全局 `store-dir`。如果 Profile 中记录的插件路径仍然存在，先使用当前 pnpm 重建依赖：
+
+```bash
+cd "${DSH_HOME:-$HOME/.dsh}/profiles/web"
+pnpm install
+```
+
+如果同时提示旧的本地插件目录不存在，先通过 DSH 插件管理器移除失效依赖，再添加当前目录或 Git 地址：
+
+```bash
+cd "$DSH_SOURCE"
+pnpm dsh plugin --profile web remove dsh-cangzhi
+pnpm dsh plugin --profile web add "$CANGZHI_PLUGIN_SPEC"
+pnpm dsh web --dump-config
+```
+
+该操作只重建 Profile 的插件依赖，不会删除 DSH credentials 或藏知数据。
+
 ### DSH 启动时报端口占用
 
 修改 `CANGZHI_DSH_MCP_PORT` 后重启 DSH。该值同时用于插件 Host 和 `cangzhi-mcp`，只应通过环境变量统一修改。
