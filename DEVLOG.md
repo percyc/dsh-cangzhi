@@ -47,6 +47,12 @@
 - **修复**：Client 注入 Session Controller，从当前 session list 读取选中会话，并让首页、输入区、会话头部共用同一 session 策略；切换会话时自动重新读取对应开关。
 - **验证**：重新构建、`node --check`、`git diff --check`，并用最新 DSH 启动 Web profile 无插件加载错误。
 
+## 2026-08-31：修复 Markdown、数据表和证据预览
+
+- **问题**：工作台统一请求 PDF 版式预览，Markdown 和 Excel 没有可用的 `preview_blob` 时显示空白；证据卡片对 MCP 包装层和字符串形式的 `document_id` 处理不完整，右侧预览按钮可能缺失。
+- **实现**：Markdown/文本资料改读文档当前版本的 `raw_content`；数据表通过 `datasets?document_id=` 和 `/rows` 渲染前 100 行；证据结果增加多层 MCP payload 解包、数字 ID 归一化，并在搜索证据和问答引用中提供“右侧预览”。
+- **验证**：构建、`node --check lib/index.js`、`node --check lib/client.js` 和 `git diff --check` 均通过。
+
 ## 2026-08-31：会话策略在切换“开”时泄漏工具限制
 
 - **背景**：用户报告在 DSH 对话里点击“关闭藏知”后模型仍能调用 `mcp__cangzhi__*` 工具并返回菜单。审计 `src/index.ts` 的会话策略实现，发现两个串联问题：
