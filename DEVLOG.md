@@ -145,3 +145,9 @@
   - `evidence.mjs` 仍然没有 `.d.mts`，TypeScript 端只能从 `.mjs` 推断，复杂返回类型（如 `collectStructuredEvidence` 的 `Array<{...}>`）目前用 plugin.tsx 内 `EvidenceLink` 显式 cast 处理。后续如要给 lib 补完整类型桥，可单独立 ADR。
   - 档位按钮组的 ARIA 名称仍用汉字 "窄/标准/宽"，对英文 / 盲文用户可读性一般；如要本地化需要把 `WORKBENCH_SIZE_LABELS_ZH` 拆成 `t('workbench.size.narrow')` 等键，留待 DSH i18n 体系确认后处理。
   - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次修复已构建到 `lib/client.js`，用户下次重启 DSH 即可生效。
+
+## 2026-08-31：最终回答增加来源按钮并精简工作台顶栏
+
+- **问题**：模型在最终回答中使用“文档 387《指标数据更新明细》dataset_id=354”时，旧回退规则只识别 `document_id` / `文档 ID`，因此没有来源按钮；窄/标准/宽和全屏控件与拖拽重复，顶栏显得拥挤。
+- **实现**：文本证据解析改为独立提取文档与数据集编号，兼容自然语言、Markdown 加粗和先数据集后文档的顺序；接入 DSH `conversation.chat.assistant-actions`，在最终回答底部直接显示“来源”按钮并打开对应右侧数据表。移除档位/全屏按钮及其运行时状态，只保留 360–760px 拖拽和 `cangzhi-workbench-width` 记忆。
+- **验证**：新增两项文本证据回归用例，并通过完整构建、语法检查、单元测试和差异检查。

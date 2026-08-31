@@ -70,21 +70,22 @@ export function dedupeEvidenceLinks(links, limit) {
   return out
 }
 
-const ANSWER_EVIDENCE_PATTERN = /(?:document[_ ]id|文档[Ii][Dd])\s*[=:：]?\s*(\d+)[^\n。；;]{0,160}?(?:dataset[_ ]id|数据集[Ii][Dd])\s*[=:：]?\s*(\d+)/giu
+const DOCUMENT_ID_PATTERN = /(?:document[_\s-]*id|文档(?:\s*[Ii][Dd])?)\s*(?:[=:：]|是|为)?\s*\*{0,2}(\d+)\*{0,2}/iu
+const DATASET_ID_PATTERN = /(?:dataset[_\s-]*id|数据集(?:\s*[Ii][Dd])?)\s*(?:[=:：]|是|为)?\s*\*{0,2}(\d+)\*{0,2}/iu
 const ANSWER_TITLE_PATTERN = /《([^》]+)》/u
 
 export function fallbackAnswerEvidence(answer) {
   if (typeof answer !== 'string' || answer.length === 0) return null
-  for (const match of answer.matchAll(ANSWER_EVIDENCE_PATTERN)) {
-    const documentId = Number(match[1])
-    const datasetId = Number(match[2])
-    if (!Number.isSafeInteger(documentId) || documentId <= 0) continue
-    if (!Number.isSafeInteger(datasetId) || datasetId <= 0) continue
-    const titleMatch = ANSWER_TITLE_PATTERN.exec(answer)
-    const title = titleMatch?.[1]?.trim() || '数据表证据'
-    return { documentId, datasetId, title, snippet: undefined }
-  }
-  return null
+  const documentMatch = DOCUMENT_ID_PATTERN.exec(answer)
+  const datasetMatch = DATASET_ID_PATTERN.exec(answer)
+  if (documentMatch === null || datasetMatch === null) return null
+  const documentId = Number(documentMatch[1])
+  const datasetId = Number(datasetMatch[1])
+  if (!Number.isSafeInteger(documentId) || documentId <= 0) return null
+  if (!Number.isSafeInteger(datasetId) || datasetId <= 0) return null
+  const titleMatch = ANSWER_TITLE_PATTERN.exec(answer)
+  const title = titleMatch?.[1]?.trim() || '数据表证据'
+  return { documentId, datasetId, title, snippet: undefined }
 }
 
 export function answerEvidence(answer) {

@@ -10,20 +10,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import css from './Cangzhi.module.css'
 import {
-  WORKBENCH_FULLSCREEN_MAX,
   WORKBENCH_SIZE_MIN,
   WORKBENCH_SIZE_MAX,
-  WORKBENCH_SIZES,
   WORKBENCH_SIZE_TABLE,
   clampWorkbenchWidth,
-  detectWorkbenchSize,
-  readWorkbenchInitialState,
-  sizeGlyph,
-  sizeLabel,
+  readWorkbenchWidthFromStorage,
 } from './lib/workbench-size.mjs'
 import {
   answerEvidence as answerEvidenceShared,
@@ -1645,7 +1641,6 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
 type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
 type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
 type WorkbenchTab = 'browse' | 'preview' | 'context'
-type WorkbenchSize = 'narrow' | 'standard' | 'wide'
 type PreviewTable = { datasetId: number; columns: string[]; rows: Array<Record<string, unknown>>; total: number; offset: number; limit: number }
 const PREVIEW_PAGE_SIZE = 50
 
@@ -1671,6 +1666,23 @@ function answerEvidence(answer: string): EvidenceLink | null {
   return answerEvidenceShared(answer) as EvidenceLink | null
 }
 
+type AssistantEvidenceActionProps = PropsRuntime<'conversation.chat.assistant-actions'>
+
+function AssistantEvidenceAction({ messageId, useChat }: AssistantEvidenceActionProps) {
+  const answer = useChat(snapshot => {
+    for (const node of snapshot.nodes.values()) {
+      if (node.kind !== 'assistant-step') continue
+      if (node.data.finalNode?.messageId !== messageId) continue
+      return node.data.blocks.flatMap(block => block.kind === 'text' ? [block.text] : []).join('')
+    }
+    return ''
+  })
+  const evidence = answerEvidence(answer)
+  if (evidence === null) return null
+  const label = `打开来源证据：${evidence.title}`
+  return <button type="button" className={css.assistantEvidenceAction} aria-label={label} title={label} onClick={() => openDocumentInWorkbench(evidence.documentId, evidence.title, evidence.datasetId ?? undefined)}>▤ 来源</button>
+}
+
 function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
   const state = useCangzhiConsole(value => value)
   const [auth, setAuth] = useState<AuthState | null>(null)
@@ -1687,9 +1699,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   const [previewState, setPreviewState] = useState('选择资料后可在这里预览原文')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  const [width, setWidth] = useState(() => readWorkbenchInitialState(window.localStorage).width)
-  const [size, setSize] = useState<WorkbenchSize>(() => readWorkbenchInitialState(window.localStorage).size)
-  const [fullscreen, setFullscreen] = useState<boolean>(() => readWorkbenchInitialState(window.localStorage).fullscreen)
+  const [width, setWidth] = useState(() => readWorkbenchWidthFromStorage(window.localStorage))
   const uploadInput = useRef<HTMLInputElement>(null)
   const resizeStart = useRef({ x: 0, width: WORKBENCH_SIZE_TABLE.standard })
   const widthRef = useRef(width)
@@ -1733,15 +1743,14 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     const frame = document.querySelector('[data-shell-overlay]')?.parentElement
     if (frame === undefined || frame === null || !state.knowledgeOpen) return
     frame.dataset.cangzhiWorkbench = 'true'
-    if (fullscreen) frame.dataset.cangzhiWorkbenchFullscreen = 'true'
-    else delete frame.dataset.cangzhiWorkbenchFullscreen
+    delete frame.dataset.cangzhiWorkbenchFullscreen
     frame.style.setProperty('--cangzhi-workbench-width', `${width}px`)
     return () => {
       delete frame.dataset.cangzhiWorkbench
       delete frame.dataset.cangzhiWorkbenchFullscreen
       frame.style.removeProperty('--cangzhi-workbench-width')
     }
-  }, [state.knowledgeOpen, width, fullscreen])
+  }, [state.knowledgeOpen, width])
   const search = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy(true); setNotice('')
     const response = await fetch(`${API}/search`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: query.trim(), limit: 40, offset: 0 }) })
@@ -1839,38 +1848,15 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
     event.currentTarget.releasePointerCapture(event.pointerId)
     const final = widthRef.current
-    setSize(detectWorkbenchSize(final))
     try {
       window.localStorage.setItem('cangzhi-workbench-width', String(final))
-      window.localStorage.setItem('cangzhi-workbench-size', detectWorkbenchSize(final))
     } catch { /* storage may be unavailable */ }
-  }
-  const selectSize = (next: WorkbenchSize) => {
-    if (next === size) return
-    setSize(next)
-    const nextWidth = WORKBENCH_SIZE_TABLE[next]
-    widthRef.current = nextWidth
-    setWidth(nextWidth)
-    try {
-      window.localStorage.setItem('cangzhi-workbench-size', next)
-      window.localStorage.setItem('cangzhi-workbench-width', String(nextWidth))
-    } catch { /* storage may be unavailable */ }
-  }
-  const toggleFullscreen = () => {
-    setFullscreen(previous => {
-      const next = !previous
-      try { window.localStorage.setItem('cangzhi-workbench-fullscreen', String(next)) } catch { /* storage may be unavailable */ }
-      return next
-    })
   }
   if (!state.knowledgeOpen) return null
   const visible = results.length > 0 || query.trim() ? results : documents
-  const renderWidth = fullscreen
-    ? `min(100vw - 32px, ${WORKBENCH_FULLSCREEN_MAX}px)`
-    : width
-  return <aside className={css.knowledgeWorkbench} data-cangzhi-workbench-fullscreen={String(fullscreen)} data-cangzhi-workbench-size={size} aria-label="藏知工作台" style={{ width: renderWidth }}>
-    <div className={css.workbenchResize} role="separator" aria-orientation="vertical" aria-label="调整藏知工作台宽度" aria-valuemin={WORKBENCH_SIZE_MIN} aria-valuemax={WORKBENCH_SIZE_MAX} aria-valuenow={width} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize} data-disabled={String(fullscreen)}/>
-    <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div className={css.workbenchSizeGroup} role="group" aria-label="工作台宽度档位">{WORKBENCH_SIZES.map(option => <button key={option} type="button" data-active={String(size === option)} aria-pressed={size === option} aria-label={sizeLabel(option)} title={sizeLabel(option)} onClick={() => selectSize(option)}>{sizeGlyph(option)}</button>)}<button type="button" data-active={String(fullscreen)} aria-pressed={fullscreen} aria-label={fullscreen ? '退出全屏阅读' : '进入全屏阅读'} title={fullscreen ? '退出全屏阅读' : '进入全屏阅读'} onClick={toggleFullscreen}>{fullscreen ? '⤡' : '⤢'}</button></div><div><button title="知识库管理" onClick={openConsole}>⚙</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
+  return <aside className={css.knowledgeWorkbench} aria-label="藏知工作台" style={{ width }}>
+    <div className={css.workbenchResize} role="separator" aria-orientation="vertical" aria-label="调整藏知工作台宽度" aria-valuemin={WORKBENCH_SIZE_MIN} aria-valuemax={WORKBENCH_SIZE_MAX} aria-valuenow={width} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize}/>
+    <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div><button title="知识库管理" onClick={openConsole}>⚙</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
     {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
@@ -2080,6 +2066,10 @@ export function apply(ctx: ClientContext): void {
     name: 'shell.overlay', id: 'cangzhi-knowledge-workbench', order: 90,
     inject: () => consoleFace,
   }, KnowledgeWorkbench))
+
+  ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
+    name: 'conversation.chat.assistant-actions', id: 'cangzhi-evidence', order: 5,
+  }, AssistantEvidenceAction))
 
   ctx.slots.inject('tool.call.toolview', function* () {
     for (const rawName of RAW_TOOLS) {

@@ -217,6 +217,23 @@ test('evidence — fallback regex still finds the legacy inline citation format'
   assert.equal(link.title, 'Q1 报表')
 })
 
+test('evidence — fallback recognises natural-language document numbers in final answers', () => {
+  const answer = '数据来源：藏知文档 387《指标数据更新明细》dataset_id=354。'
+  const link = fallbackAnswerEvidence(answer)
+  assert.ok(link !== null)
+  assert.equal(link.documentId, 387)
+  assert.equal(link.datasetId, 354)
+  assert.equal(link.title, '指标数据更新明细')
+})
+
+test('evidence — fallback accepts dataset-first and markdown-bold ids', () => {
+  const answer = '数据集 ID 是 **354**，对应文档 387《指标数据更新明细》。'
+  const link = fallbackAnswerEvidence(answer)
+  assert.ok(link !== null)
+  assert.equal(link.documentId, 387)
+  assert.equal(link.datasetId, 354)
+})
+
 test('evidence — fallback regex returns null when no citation is present', () => {
   assert.equal(fallbackAnswerEvidence('没有引用，纯文本回答。'), null)
   assert.equal(fallbackAnswerEvidence(''), null)

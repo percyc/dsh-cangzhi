@@ -25,14 +25,12 @@
 - 客户端 `setPolicy` 改为只在 Host 确认后提交本地状态与 `localStorage`，杜绝“UI 显示关闭但模型仍可调用工具”的假关闭。
 - 增加 `tests/session-policy.test.mjs`，覆盖默认状态、关闭、再次开启、父→子传播与子→父隔离。
 - 数据表预览改为服务端分页，支持每页 25/50/100/200 行切换，并将表格字号统一到 DSH 的 13px/20px 控件正文尺度。
-- 知识工具结果卡片/工作台加入"打开来源证据/右侧预览"统一入口：`knowledge_query_dataset` 改为结构化 JSON 解析并去重展示最多 3 条来源，`knowledge_ask` 在无结构化引用时回退到答案文本提取并复用 `cangzhi-open-document` 事件。
-- 藏知工作台加入窄（420px）/ 标准（520px）/ 宽（720px）三档与全屏阅读切换，保留原有 360–760 拖拽范围与本地记忆，外层 frame 通过 `--cangzhi-workbench-width` 与 `[data-cangzhi-workbench-fullscreen]` 同步；移动端档位按钮自动隐藏，不影响已有折叠行为。
-- 第二轮审查补刀：全屏档位的 workbench 自身 `max-width/min-width` 也会被 class 截断，补一条 `.knowledgeWorkbench[data-cangzhi-workbench-fullscreen='true']` 覆盖规则；新增 `readWorkbenchInitialState` 让 size/width/fullscreen 三个 `useState` 用同一份 storage 推导，消除"宽 500 但'宽'按钮高亮"等初始化漂移。
+- 知识工具结果卡片/工作台加入"打开来源证据/右侧预览"统一入口；最终回答下方也通过 DSH `conversation.chat.assistant-actions` 显示“来源”按钮。文本回退兼容 `document_id=387`、`文档 387`、`dataset_id=354`、`数据集 ID 是 **354**` 等常见格式。
+- 工作台保留 360–760px 连续拖拽与宽度记忆；用户验证后移除窄/标准/宽档位和全屏按钮，减少顶栏视觉噪音。
 
 ## 当前协作任务
 
-- 负责人：Ark（实现）、MiniMax M3（审查与构建）。
-- 验收：构建、`node --check`、单元测试（含新增 `tests/workbench-and-evidence.test.mjs`）和 `git diff --check` 全部通过；`cangzhi-open-document` 事件契约不变。
+暂无未登记的进行中任务。
 
 下一项优先任务：把活动知识空间从进程级状态升级为 DSH `sessionId` / 用户级状态。
 
