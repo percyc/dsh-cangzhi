@@ -104,3 +104,44 @@
 - **问题**：数据表预览固定只请求前 100 行，无法查看较大的数据集；表格单元格字号仍使用 9px，明显小于 DSH 的正文/控件字号。
 - **实现**：改为服务端分页请求，默认每页 50 行，支持 25/50/100/200 行切换、上一页/下一页和当前页范围提示；分页请求继续携带 `offset`/`limit`，不会一次性加载完整数据集。表格和分页控件统一到 DSH 的 13px/20px 控件正文尺度。
 - **验证**：重新构建、Node 语法检查和 `git diff --check` 通过。
+
+## 2026-08-31：证据入口结构化 + 工作台档位与全屏阅读
+
+- **背景**：
+  - `knowledge_query_dataset` 的结果对象里其实已经带 `document_id` / `dataset_id`，但卡片渲染只走 `resultPreview` 文本路径，模型答错数据集时用户无法直接打开来源；`answerEvidence` 又只靠脆弱正则从 `knowledge_ask` 文本里识别。
+  - 藏知工作台只有一个连续拖拽的宽度，没有"档位"概念；阅读较长 PDF/Markdown 时要么太小要么太挤。
+- **实现**：
+  - 抽出 `src/client/lib/evidence.mjs` 与 `src/client/lib/workbench-size.mjs` 两个零依赖模块；plugin.tsx 改 import 这些纯函数。`EvidencePreview` 增加 `knowledge_query_dataset` 分支，递归解包 MCP `content`/`structuredContent`/`result` 三层后再用 `collectStructuredEvidence` 收集 `document_id + dataset_id` 链接，按 document+dataset 去重最多 3 条，按钮文案统一为"打开来源证据 · 右侧预览"，并复用既有的 `cangzhi-open-document` 事件。`answerEvidence` 改为先尝试把 `answer` 解析为 JSON 取结构化链接，结构化拿不到时再回退到正则；`knowledge_ask` 优先用 `payload` 自身的结构化字段，结构化为空时再走 answer 文本。
+  - 工作台增加 `narrow/standard/wide` 三档（420/520/720），并加入全屏阅读切换。`selectSize` 同步写入 `cangzhi-workbench-size` + `cangzhi-workbench-width`；全屏写入 `cangzhi-workbench-fullscreen` 并在 frame 上挂 `data-cangzhi-workbench-fullscreen`，CSS 通过 `[data-cangzhi-workbench='true'][data-cangzhi-workbench-fullscreen='true']` 调整为 `min(1100px, 100vw - 32px)`。拖拽的 `endResize` 仍然按 360–760 收尾并推断档位，原有 `cangzhi-workbench-width` 兼容性保留。移动端断点同步隐藏档位按钮，避免桌面之外的回归。
+- **验证**：
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node /home/percy/software/deepseek-harness/node_modules/.bin/tsdown --config tsdown.config.ts` 通过。
+  - `node scripts/rewrite-client-id.mjs` 通过。
+  - `node --check lib/index.js` 与 `node --check lib/client.js` 通过。
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node --test tests/*.test.mjs` 全部 20 项断言通过（1 项 `session-policy` + 19 项 `workbench-and-evidence`）。
+  - `git diff --check` 无冲突标记。
+- **保留问题**：
+  - 新的 `knowledge_query_dataset` 卡片只展示带 `dataset_id` 的前 3 条；模型没有声明数据集时不会显示按钮，符合"避免假按钮"的原则，但极端场景下模型可能漏报。
+  - `cangzhi-workbench-size` 与 `cangzhi-workbench-fullscreen` 仅存浏览器 localStorage，未与 DSH 设置体系同步；如果用户切换浏览器或清缓存会回到默认档位。
+  - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；新代码已构建到 `lib/client.js` 并通过测试，用户下次重启 DSH 即可生效。
+
+## 2026-08-31：第二轮审查：全屏宽度被 class 截断 + size/width 初始化漂移
+
+- **审查人**：MiniMax M3
+- **审查范围**：Ark 这一轮 `src/client/lib/{evidence,workbench-size}.mjs`、`src/client/plugin.tsx`、`src/client/Cangzhi.module.css` 与 `tests/workbench-and-evidence.test.mjs`。
+- **结论 1（已修复）**：`knowledge_query_dataset` 与 `knowledge_ask` 的结构化证据入口是稳的。`collectStructuredEvidence` 递归解包 `rows / items / citations / result / structuredContent` 三层后产出 `{ documentId, datasetId, title, snippet }`；`dedupeEvidenceLinks(..., 3)` 在插件层去掉 `datasetId === null` 的项（避免出现"只点开文档、找不到工作台数据集"）。文本回退仅在 JSON 拿不到时触发，行为与之前一致。新增 9 个针对 `idNumber / collectStructuredEvidence / dedupeEvidenceLinks / fallbackAnswerEvidence / answerEvidence / formatEvidenceLink` 的单元测试，单测的 wrapper `wrapper.content[0].text` 显式覆盖 MCP 字符串 payload 形态，足够兜住空数组 / 嵌套数组 / 数字 ID / 字符串 ID 几种典型输入。
+- **结论 2（已修复）**：藏知工作台档位 / 全屏逻辑整体稳，但**全屏切换实际不生效**。
+  - 问题 1：`.knowledgeWorkbench` 的 `max-width: min(760px, calc(100vw - 320px));` 是 class 规则，优先级高于 `style.width` 的 `width` 属性；当 `fullscreen` 为 true 时，内联 `width: min(100vw - 32px, 1100px)` 被 class `max-width: 760px` 截断，外加 `min-width: 360px` 在 320px 视口下也卡死。Frame 的 `padding-right: min(1100px, 100vw - 32px)` 让出来了，但工作台本身只到 760px，frame 与工作台之间留出 340px 空白。
+  - 修复 1：新增 `.knowledgeWorkbench[data-cangzhi-workbench-fullscreen='true'] { min-width: 0; max-width: min(1100px, calc(100vw - 32px)); border-left-color: transparent; box-shadow: none; }`。
+  - 问题 2：`useState` 用 `readWorkbenchWidthFromStorage` + `readWorkbenchSizeFromStorage` 独立读两遍 storage。若只存了 `cangzhi-workbench-size='wide'` + `cangzhi-workbench-width='500'`（典型迁移场景：用户在旧版只拖到 500，但保存时被新代码写入了 size），初始化会出现"宽 500px 但'宽'按钮高亮"的不一致；反之只存 width 不存 size 时，`readWorkbenchSizeFromStorage` 默认 'standard'，会让 `isWorkbenchSize` 误以为 size 已存，永远走 size 分支，不再用 saved width。
+  - 修复 2：在 `src/client/lib/workbench-size.mjs` 新增 `readWorkbenchInitialState(storage)`：先 `readRawWorkbenchSize` 直接读原始值（无默认值），仅当原始值通过 `isWorkbenchSize` 时才用 `WORKBENCH_SIZE_TABLE[size]` 作 width；否则用 `readWorkbenchWidthFromStorage` 的 width 推断 size。`plugin.tsx` 三个 `useState` 改用 `readWorkbenchInitialState(window.localStorage).{width,size,fullscreen}`，旧的 `readWorkbenchWidthFromStorage / readWorkbenchSizeFromStorage / readWorkbenchFullscreenFromStorage` import 一并清理。
+- **结论 3（保留）**：移动端 `max-width: 760px` 媒体查询里 `.knowledgeWorkbench { width: min(100vw, 520px) !important; ... }` 已用 `!important` 覆盖内联 width，所以 mobile 仍然按 520 上限。`workbenchSizeGroup` 在该断点下 `display: none`，档位按钮对 mobile 用户不可见，行为符合 ADR-003。
+- **验证**：
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness /home/percy/software/deepseek-harness/node_modules/.bin/tsdown --config tsdown.config.ts` 通过；输出 `lib/index.js 49.66 kB / lib/client.js 236.08 kB`。
+  - `node scripts/rewrite-client-id.mjs` 通过。
+  - `npm run check`（`node --check lib/index.js && node --check lib/client.js`）通过。
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node --test tests/*.test.mjs` 全部 23 项断言通过（1 项 `session-policy` + 22 项 `workbench-and-evidence`，其中 `readWorkbenchInitialState` 新增 3 个用例覆盖 preset 优先 / 旧 width 推断 / 非法 size 回退）。
+  - `git diff --check` 无冲突标记。
+- **保留问题**（不在本轮范围）：
+  - `evidence.mjs` 仍然没有 `.d.mts`，TypeScript 端只能从 `.mjs` 推断，复杂返回类型（如 `collectStructuredEvidence` 的 `Array<{...}>`）目前用 plugin.tsx 内 `EvidenceLink` 显式 cast 处理。后续如要给 lib 补完整类型桥，可单独立 ADR。
+  - 档位按钮组的 ARIA 名称仍用汉字 "窄/标准/宽"，对英文 / 盲文用户可读性一般；如要本地化需要把 `WORKBENCH_SIZE_LABELS_ZH` 拆成 `t('workbench.size.narrow')` 等键，留待 DSH i18n 体系确认后处理。
+  - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次修复已构建到 `lib/client.js`，用户下次重启 DSH 即可生效。
