@@ -1,5 +1,7 @@
 # dsh-cangzhi 开发交接
 
+> 当前状态已统一维护在 [PROJECT_STATUS.md](./PROJECT_STATUS.md)。开发前请先阅读 `AGENTS.md`，重要节点追加 `DEVLOG.md`，架构取舍记录在 `docs/adr/`。本文件保留作为旧入口，不再单独维护当前状态。
+
 ## 产品边界
 
 本仓库是独立 DSH 适配器，不是藏知 monorepo 的子模块。禁止从藏知源码目录导入模块、反推相对路径或直接初始化藏知数据库。藏知对本项目只暴露 Web、REST API、PAT 和 streamable HTTP MCP。
