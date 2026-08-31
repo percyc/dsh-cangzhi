@@ -54,6 +54,41 @@ const zh = {
   healthStorageHigh: '存储已使用 {{percent}}%',
   healthDatabase: '数据库状态：{{status}}',
   healthSystemUnavailable: '无法读取服务器状态',
+  popoverTitle: '藏知知识能力',
+  popoverClose: '关闭',
+  popoverStatus: '服务状态',
+  popoverStatusOnline: '已连接',
+  popoverStatusOffline: '未连接',
+  popoverPolicy: '知识能力偏好',
+  popoverPolicyHint: '用于记录当前浏览器的使用偏好；后端会话隔离完成后才会真正按对话生效。',
+  popoverPolicyOff: '关闭',
+  popoverPolicyAuto: '自动',
+  popoverPolicyAlways: '始终使用',
+  popoverPolicyOffHint: '当前版本仅记录偏好，不会撤销 DSH 已注册的模型工具',
+  popoverPolicyAutoHint: '当前版本保持默认行为；后端隔离后由模型按问题决定是否调用',
+  popoverPolicyAlwaysHint: '当前版本保持默认行为；后端隔离后会声明空间并优先检索',
+  popoverWorkspace: '当前知识空间',
+  popoverWorkspaceHint: '切换后模型工具立即使用新空间',
+  popoverLoginFailed: '登录失败，请检查账号密码后重试',
+  popoverScopeNote: '会话级：仅本对话',
+  popoverScopeGlobal: '进程级：所有 DSH 浏览器共享',
+  popoverConnect: '启用模型检索',
+  popoverDisconnect: '断开 DSH 对话连接',
+  popoverOpenLibrary: '打开资料抽屉',
+  popoverOpenConsole: '打开管理中心',
+  popoverLoginTitle: '登录藏知',
+  popoverLoginHint: '登录后才能选择知识空间、上传和管理资料。',
+  popoverUsername: '藏知用户名',
+  popoverPassword: '密码',
+  popoverSubmitLogin: '登录并连接',
+  popoverLoggingIn: '登录中…',
+  popoverScopeBadge: '本对话设置',
+  popoverScopeBadgeGlobal: '进程共享',
+  popoverHeaderHint: '页面与模型工具会同步切换知识空间',
+  dockEntry: '知识',
+  homeEntry: '藏知知识',
+  homeEntryHint: '点击管理知识能力、空间与资料',
+  homeEntryLogin: '点击登录并连接藏知',
   settingsTab: '藏知',
   settingsTitle: '藏知连接',
   settingsDescription: '配置 DSH 使用的藏知服务地址和默认知识空间。访问令牌仍由 DSH 凭据存储单独管理。',
@@ -69,6 +104,7 @@ const zh = {
   settingsSave: '保存配置',
   settingsSaving: '正在保存…',
   settingsSaved: '配置已保存。',
+  settingsSaveFailed: '保存失败，请稍后重试或检查配置格式。',
   settingsTest: '测试连接',
   settingsTesting: '正在测试…',
   settingsTestOk: '藏知 API 连接正常。',
@@ -114,6 +150,41 @@ const en = {
   healthStorageHigh: 'Storage is {{percent}}% used',
   healthDatabase: 'Database status: {{status}}',
   healthSystemUnavailable: 'Unable to read server status',
+  popoverTitle: 'Cangzhi knowledge',
+  popoverClose: 'Close',
+  popoverStatus: 'Service status',
+  popoverStatusOnline: 'Connected',
+  popoverStatusOffline: 'Not connected',
+  popoverPolicy: 'Knowledge preference',
+  popoverPolicyHint: 'Records this browser’s preference. It will apply per conversation after backend session isolation is implemented.',
+  popoverPolicyOff: 'Off',
+  popoverPolicyAuto: 'Auto',
+  popoverPolicyAlways: 'Always',
+  popoverPolicyOffHint: 'This version records the preference but does not revoke DSH-registered model tools.',
+  popoverPolicyAutoHint: 'Default behavior for now; after backend isolation the model will decide when to call tools.',
+  popoverPolicyAlwaysHint: 'Default behavior for now; after backend isolation the active workspace will be emphasized.',
+  popoverWorkspace: 'Active knowledge workspace',
+  popoverWorkspaceHint: 'The new selection is used by the next MCP call immediately.',
+  popoverLoginFailed: 'Login failed. Check your username and password and try again.',
+  popoverScopeNote: 'Per conversation',
+  popoverScopeGlobal: 'Process wide: shared by every DSH browser tab',
+  popoverConnect: 'Enable model retrieval',
+  popoverDisconnect: 'Disconnect DSH conversation',
+  popoverOpenLibrary: 'Open material drawer',
+  popoverOpenConsole: 'Open management console',
+  popoverLoginTitle: 'Sign in to Cangzhi',
+  popoverLoginHint: 'Sign in to pick a workspace, upload and manage knowledge.',
+  popoverUsername: 'Cangzhi username',
+  popoverPassword: 'Password',
+  popoverSubmitLogin: 'Sign in & connect',
+  popoverLoggingIn: 'Signing in…',
+  popoverScopeBadge: 'Conversation setting',
+  popoverScopeBadgeGlobal: 'Process shared',
+  popoverHeaderHint: 'The page and the model tools switch knowledge workspaces together',
+  dockEntry: 'Knowledge',
+  homeEntry: 'Cangzhi knowledge',
+  homeEntryHint: 'Click to manage knowledge capability, workspaces and materials',
+  homeEntryLogin: 'Click to sign in and connect Cangzhi',
   settingsTab: 'Cangzhi',
   settingsTitle: 'Cangzhi connection',
   settingsDescription: 'Configure the Cangzhi services and default workspace used by DSH. Access tokens remain in the separate DSH credential store.',
@@ -129,6 +200,7 @@ const en = {
   settingsSave: 'Save settings',
   settingsSaving: 'Saving…',
   settingsSaved: 'Settings saved.',
+  settingsSaveFailed: 'Save failed. Retry later or check the configuration format.',
   settingsTest: 'Test connection',
   settingsTesting: 'Testing…',
   settingsTestOk: 'The Cangzhi API is reachable.',
@@ -222,18 +294,295 @@ async function syncModelWorkspace(slug: string): Promise<void> {
   window.dispatchEvent(new CustomEvent('cangzhi-workspace-changed', { detail: { slug } }))
 }
 
-type HomeIntegrationProps = InjectFace<ConsoleFace>
+type KnowledgePolicy = 'off' | 'auto' | 'always'
 
-function HomeIntegration({ openConsole, openKnowledge }: HomeIntegrationProps) {
+const POLICY_VALUES: readonly KnowledgePolicy[] = ['off', 'auto', 'always']
+const POLICY_STORAGE_PREFIX = 'cangzhi:session:'
+const POLICY_EVENT = 'cangzhi-policy-changed'
+
+function isKnowledgePolicy(value: unknown): value is KnowledgePolicy {
+  return typeof value === 'string' && (POLICY_VALUES as readonly string[]).includes(value)
+}
+
+function loadSessionKey(): string {
+  let stored: string | null = null
+  try { stored = window.localStorage.getItem(`${POLICY_STORAGE_PREFIX}key`) } catch { /* storage may be unavailable */ }
+  if (typeof stored === 'string' && stored.length > 0 && stored.length <= 128) return stored
+  const generated = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+    ? crypto.randomUUID()
+    : `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  try { window.localStorage.setItem(`${POLICY_STORAGE_PREFIX}key`, generated) } catch { /* storage may be unavailable */ }
+  return generated
+}
+
+function loadPolicy(sessionKey: string): KnowledgePolicy {
+  let value: string | null = null
+  try { value = window.localStorage.getItem(`${POLICY_STORAGE_PREFIX}${sessionKey}:policy`) } catch { /* storage may be unavailable */ }
+  return isKnowledgePolicy(value) ? value : 'auto'
+}
+
+function savePolicy(sessionKey: string, policy: KnowledgePolicy): void {
+  try { window.localStorage.setItem(`${POLICY_STORAGE_PREFIX}${sessionKey}:policy`, policy) } catch { /* storage may be unavailable */ }
+  window.dispatchEvent(new CustomEvent(POLICY_EVENT, { detail: { sessionKey, policy } }))
+}
+
+interface KnowledgeSessionState {
+  readonly sessionKey: string
+  readonly policy: KnowledgePolicy
+  readonly scope: 'conversation' | 'process'
+  setPolicy(next: KnowledgePolicy): void
+}
+
+/**
+ * Per-browser knowledge policy hook. The active policy and the localStorage
+ * key that scopes it live entirely in the caller's browser; the value is
+ * surfaced to other DSH browser tabs only through the `storage` event. This
+ * is NOT real session isolation: the Host's `activeWorkspaceSlug` is still
+ * process-wide, and the UI always labels the policy as `scope: 'process'`.
+ * Do not remove the badge or the `popoverScopeGlobal` copy that names the
+ * limitation explicitly.
+ */
+function useKnowledgeSession(): KnowledgeSessionState {
+  const [sessionKey, setSessionKey] = useState<string>(() => loadSessionKey())
+  const [policy, setPolicyState] = useState<KnowledgePolicy>(() => loadPolicy(sessionKey))
+  useEffect(() => {
+    const refresh = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionKey?: string; policy?: KnowledgePolicy }>).detail
+      if (detail?.sessionKey !== undefined && detail.sessionKey !== sessionKey) {
+        setSessionKey(detail.sessionKey)
+        setPolicyState(isKnowledgePolicy(detail.policy) ? detail.policy : 'auto')
+        return
+      }
+      setPolicyState(loadPolicy(sessionKey))
+    }
+    const storage = (event: StorageEvent) => {
+      if (event.key === `${POLICY_STORAGE_PREFIX}key`) {
+        const next = loadSessionKey()
+        setSessionKey(next)
+        setPolicyState(loadPolicy(next))
+      } else if (event.key !== null && event.key.endsWith(':policy')) {
+        setPolicyState(loadPolicy(sessionKey))
+      }
+    }
+    window.addEventListener(POLICY_EVENT, refresh)
+    window.addEventListener('storage', storage)
+    return () => {
+      window.removeEventListener(POLICY_EVENT, refresh)
+      window.removeEventListener('storage', storage)
+    }
+  }, [sessionKey])
+  const setPolicy = (next: KnowledgePolicy): void => {
+    if (next === policy) return
+    setPolicyState(next)
+    savePolicy(sessionKey, next)
+  }
+  return { sessionKey, policy, scope: 'process', setPolicy }
+}
+
+interface KnowledgePopoverProps {
+  anchor: HTMLElement | null
+  auth: AuthState | null
+  plugin: PluginStatus | null
+  workspace: Workspace | null
+  workspaces: Workspace[]
+  onClose(): void
+  onLogin(username: string, password: string): Promise<void>
+  onConnect(): Promise<void>
+  onDisconnect(): Promise<void>
+  onSwitchWorkspace(slug: string): Promise<void>
+  onOpenLibrary(): void
+  onOpenConsole(): void
+  busy: boolean
+  notice: string
+  t: (key: string, params?: Record<string, string | number>) => string
+}
+
+function KnowledgePopover(props: KnowledgePopoverProps) {
+  const { anchor, auth, plugin, workspace, workspaces, onClose, onLogin, onConnect, onDisconnect, onSwitchWorkspace, onOpenLibrary, onOpenConsole, busy, notice, t } = props
+  const session = useKnowledgeSession()
+  const [position, setPosition] = useState<{ top: number; left: number; placement: 'top' | 'bottom' } | null>(null)
+  const [loginPending, setLoginPending] = useState(false)
+  const [loginError, setLoginError] = useState('')
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const popoverRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (anchor === null) { setPosition(null); return }
+    const update = () => {
+      const rect = anchor.getBoundingClientRect()
+      const panelWidth = 320
+      const panelHeight = popoverRef.current?.offsetHeight ?? 440
+      const margin = 8
+      const viewportWidth = window.innerWidth
+      const viewportHeight = window.innerHeight
+      const desiredCenter = rect.left + rect.width / 2 - panelWidth / 2
+      const left = Math.min(Math.max(margin, desiredCenter), Math.max(margin, viewportWidth - panelWidth - margin))
+      const spaceBelow = viewportHeight - rect.bottom - margin
+      const spaceAbove = rect.top - margin
+      const minBottomSpace = 240
+      const useBottom = spaceBelow >= Math.min(panelHeight, minBottomSpace) || spaceBelow >= spaceAbove
+      const placement: 'top' | 'bottom' = useBottom ? 'bottom' : 'top'
+      let top: number
+      if (placement === 'bottom') {
+        top = Math.min(rect.bottom + 6, Math.max(margin, viewportHeight - panelHeight - margin))
+      } else {
+        // Top placement applies translateY(-100%); the popover's bottom is `top`,
+        // its top is `top - panelHeight`. Clamp so the popover never leaves the viewport.
+        top = Math.max(panelHeight + margin, rect.top - 6)
+      }
+      setPosition({ top, left, placement })
+    }
+    update()
+    window.addEventListener('resize', update)
+    window.addEventListener('scroll', update, true)
+    return () => {
+      window.removeEventListener('resize', update)
+      window.removeEventListener('scroll', update, true)
+    }
+  }, [anchor])
+
+  useEffect(() => {
+    if (anchor === null) return
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (target === null) return
+      if (popoverRef.current?.contains(target)) return
+      if (anchor.contains(target)) return
+      onClose()
+    }
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    document.addEventListener('mousedown', onPointer)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointer)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [anchor, onClose])
+
+  if (anchor === null || position === null) return null
+
+  const statusOk = Boolean(plugin?.mcpConfigured)
+  const statusText = statusOk ? t('popoverStatusOnline') : t('popoverStatusOffline')
+  const policyOptions: ReadonlyArray<{ value: KnowledgePolicy; label: string; hint: string }> = [
+    { value: 'off', label: t('popoverPolicyOff'), hint: t('popoverPolicyOffHint') },
+    { value: 'auto', label: t('popoverPolicyAuto'), hint: t('popoverPolicyAutoHint') },
+    { value: 'always', label: t('popoverPolicyAlways'), hint: t('popoverPolicyAlwaysHint') },
+  ]
+  const policyHint = policyOptions.find(option => option.value === session.policy)?.hint ?? ''
+  const showLogin = auth !== null && !auth.authenticated
+
+  const handleLogin = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setLoginPending(true); setLoginError('')
+    try { await onLogin(username, password) }
+    catch (caught) { setLoginError(caught instanceof Error ? caught.message : t('popoverLoginFailed')) }
+    finally { setLoginPending(false) }
+  }
+
+  return (
+    <div
+      ref={popoverRef}
+      className={css.knowledgePopover}
+      data-placement={position.placement}
+      role="dialog"
+      aria-label={t('popoverTitle')}
+      style={{ top: position.top, left: position.left }}
+    >
+      <header className={css.popoverHeader}>
+        <CangzhiMark size={22} />
+        <strong>{t('popoverTitle')}</strong>
+        <span className={css.popoverScopeBadge} data-global={String(true)}>{t('popoverScopeBadgeGlobal')}</span>
+        <button type="button" className={css.popoverClose} aria-label={t('popoverClose')} onClick={onClose}>×</button>
+      </header>
+
+      <section className={css.popoverRow}>
+        <span className={css.popoverLabel}>{t('popoverStatus')}</span>
+        <span className={css.popoverStatus} data-ok={String(statusOk)}><i />{statusText}</span>
+      </section>
+
+      <section className={css.popoverBlock}>
+        <div className={css.popoverBlockTitle}>
+          <strong>{t('popoverPolicy')}</strong>
+          <small>{t('popoverPolicyHint')}</small>
+        </div>
+        <div className={css.popoverSegmented} role="radiogroup" aria-label={t('popoverPolicy')}>
+          {policyOptions.map(option => (
+            <button
+              key={option.value}
+              type="button"
+              role="radio"
+              aria-checked={session.policy === option.value}
+              data-active={String(session.policy === option.value)}
+              onClick={() => session.setPolicy(option.value)}
+            >{option.label}</button>
+          ))}
+        </div>
+        <p className={css.popoverHint}>{policyHint}</p>
+        <p className={css.popoverScopeNote}>{t('popoverScopeGlobal')}</p>
+      </section>
+
+      {showLogin ? (
+        <form className={css.popoverLogin} onSubmit={handleLogin}>
+          <strong>{t('popoverLoginTitle')}</strong>
+          <small>{t('popoverLoginHint')}</small>
+          <input value={username} onChange={event => setUsername(event.target.value)} placeholder={t('popoverUsername')} autoComplete="username" required />
+          <input value={password} onChange={event => setPassword(event.target.value)} placeholder={t('popoverPassword')} type="password" autoComplete="current-password" required />
+          {loginError && <p className={css.popoverHint} role="alert">{loginError}</p>}
+          <button type="submit" disabled={loginPending || busy}>{loginPending || busy ? t('popoverLoggingIn') : t('popoverSubmitLogin')}</button>
+        </form>
+      ) : (
+        auth?.authenticated === true && (
+          <section className={css.popoverBlock}>
+            <div className={css.popoverBlockTitle}>
+              <strong>{t('popoverWorkspace')}</strong>
+              <small>{t('popoverWorkspaceHint')}</small>
+            </div>
+            <label className={css.popoverWorkspace}>
+              <CangzhiMark size={16} />
+              <select
+                value={workspace?.slug ?? ''}
+                disabled={busy || workspaces.filter(item => item.status === 'active').length === 0}
+                onChange={event => void onSwitchWorkspace(event.target.value)}
+              >
+                {workspaces.filter(item => item.status === 'active').map(item => (
+                  <option key={item.id} value={item.slug}>{item.name}</option>
+                ))}
+              </select>
+            </label>
+          </section>
+        )
+      )}
+
+      {auth?.authenticated === true && !statusOk && (
+        <button className={css.popoverAction} type="button" disabled={busy} onClick={() => void onConnect()}>{t('popoverConnect')}</button>
+      )}
+      {auth?.authenticated === true && statusOk && (
+        <button className={css.popoverActionGhost} type="button" disabled={busy} onClick={() => void onDisconnect()}>{t('popoverDisconnect')}</button>
+      )}
+
+      {notice && <p className={css.popoverNotice} role="status">{notice}</p>}
+
+      <footer className={css.popoverFooter}>
+        <button type="button" onClick={onOpenLibrary} disabled={!auth?.authenticated}>{t('popoverOpenLibrary')}</button>
+        <button type="button" onClick={onOpenConsole}>{t('popoverOpenConsole')}</button>
+      </footer>
+    </div>
+  )
+}
+
+
+type HomeIntegrationProps = InjectFace<ConsoleFace> & PropsLocale<typeof NS>
+
+function HomeIntegration({ openConsole, openKnowledge, t }: HomeIntegrationProps) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [username, setUsername] = useState('')
-  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  const fileInput = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   const load = async () => {
     const [authResponse, pluginResponse] = await Promise.all([
@@ -256,33 +605,46 @@ function HomeIntegration({ openConsole, openKnowledge }: HomeIntegrationProps) {
   }
   useEffect(() => { void load().catch(() => { setNotice('藏知服务暂时不可用') }) }, [])
 
-  const login = async (event: React.FormEvent) => {
-    event.preventDefault(); setBusy(true); setNotice('')
-    const response = await fetch(`${API}/auth/login`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username, password }) })
-    if (!response.ok) { setNotice(await errorMessage(response, '登录失败')); setBusy(false); return }
-    setPassword('')
-    if (plugin?.mcpConfigured) { setNotice('登录成功，藏知对话已经连接'); await load(); setBusy(false); return }
-    await connect()
-  }
-  const connect = async () => {
-    setBusy(true); setNotice('正在创建 DSH 专用访问令牌…')
-    const response = await fetch(`${API}/access-tokens`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'DSH 对话插件', scopes: ['knowledge:read', 'knowledge:search', 'knowledge:ask'] }) })
-    if (!response.ok) { setNotice(await errorMessage(response, '令牌创建失败')); setBusy(false); return }
-    const { token } = await response.json() as { token: string }
-    const setup = await fetch('/_cangzhi-plugin/token', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) })
+  const login = async (username: string, password: string): Promise<void> => {
+    setBusy(true); setNotice('')
+    const response = await fetch(`${API}/auth/login`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (!response.ok) { setBusy(false); throw new Error(await errorMessage(response, '登录失败')) }
+    if (plugin?.mcpConfigured) { setNotice('登录成功，藏知对话已经连接'); setBusy(false); await load(); return }
+    setNotice('正在创建 DSH 专用访问令牌…')
+    const tokenResponse = await fetch(`${API}/access-tokens`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'DSH 对话插件', scopes: ['knowledge:read', 'knowledge:search', 'knowledge:ask'] }),
+    })
+    if (!tokenResponse.ok) { setNotice(await errorMessage(tokenResponse, '令牌创建失败')); setBusy(false); return }
+    const { token } = await tokenResponse.json() as { token: string }
+    const setup = await fetch('/_cangzhi-plugin/token', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
+    })
     setNotice(setup.ok ? '连接成功，藏知工具正在自动上线' : await errorMessage(setup, 'DSH 凭据写入失败'))
     setBusy(false); await load()
   }
-  const upload = async (files: FileList | null) => {
-    if (!files?.length) return
+  const connect = async () => {
+    setBusy(true); setNotice('正在创建 DSH 专用访问令牌…')
+    const tokenResponse = await fetch(`${API}/access-tokens`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'DSH 对话插件', scopes: ['knowledge:read', 'knowledge:search', 'knowledge:ask'] }),
+    })
+    if (!tokenResponse.ok) { setNotice(await errorMessage(tokenResponse, '令牌创建失败')); setBusy(false); return }
+    const { token } = await tokenResponse.json() as { token: string }
+    const setup = await fetch('/_cangzhi-plugin/token', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
+    })
+    setNotice(setup.ok ? '连接成功，藏知工具正在自动上线' : await errorMessage(setup, 'DSH 凭据写入失败'))
+    setBusy(false); await load()
+  }
+  const disconnect = async () => {
     setBusy(true)
-    for (const [index, file] of Array.from(files).entries()) {
-      setNotice(`正在上传 ${index + 1}/${files.length}：${file.name}`)
-      const body = new FormData(); body.append('file', file); body.append('title', '')
-      const response = await fetch(`${API}/files/upload`, { method: 'POST', credentials: 'include', body })
-      if (!response.ok) { setNotice(await errorMessage(response, `${file.name} 上传失败`)); setBusy(false); return }
-    }
-    setNotice('上传完成，已进入知识处理队列'); setBusy(false); await load()
+    const response = await fetch('/_cangzhi-plugin/token', { method: 'DELETE' })
+    setNotice(response.ok ? '已断开 DSH 对话连接' : await errorMessage(response, '断开失败'))
+    setBusy(false); await load()
   }
   const switchWorkspace = async (slug: string) => {
     const next = workspaces.find(item => item.slug === slug)
@@ -292,47 +654,104 @@ function HomeIntegration({ openConsole, openKnowledge }: HomeIntegrationProps) {
       setWorkspaceCookie(next.slug)
       await syncModelWorkspace(next.slug)
       setWorkspace(next)
-      setNotice(`已切换到“${next.name}”，新会话将使用这个空间`)
+      setNotice(`已切换到"${next.name}"，新会话将使用这个空间`)
       await load()
     } catch (caught) { setNotice(caught instanceof Error ? caught.message : '知识空间切换失败') }
     finally { setBusy(false) }
   }
 
-  if (auth === null) return <section className={css.homeIntegration}><div className={css.homeLoading}>正在连接藏知知识库…</div></section>
-  if (!auth.authenticated) return <section className={css.homeIntegration} data-state="login">
-    <div className={css.homeIntro}><CangzhiMark size={38}/><div><strong>连接藏知知识库</strong><small>登录后，DSH 可以直接检索、引用和管理你的知识。</small></div></div>
-    <form className={css.homeLogin} onSubmit={login}><input value={username} onChange={event => setUsername(event.target.value)} placeholder="藏知用户名" autoComplete="username" required/><input value={password} onChange={event => setPassword(event.target.value)} placeholder="密码" type="password" autoComplete="current-password" required/><button disabled={busy}>{busy ? '登录中…' : '登录并连接'}</button></form>
-    {notice && <p className={css.homeNotice}>{notice}</p>}
-  </section>
-  return <section className={css.homeIntegration} data-state="ready">
-    <div className={css.homeTop}><div className={css.homeIntro}><CangzhiMark size={30}/><div><strong>知识范围</strong><small>决定模型从哪些藏知资料中检索和引用</small></div></div><span className={css.homeConnection} data-ok={String(Boolean(plugin?.mcpConfigured))}>{plugin?.mcpConfigured ? '模型检索已连接' : '等待连接'}</span></div>
-    <label className={css.homeWorkspace}><span>知识空间</span><div><CangzhiMark size={20}/><select value={workspace?.slug ?? 'default'} disabled={busy} onChange={event => void switchWorkspace(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select></div><small>只控制知识检索，不改变上方运行项目的本地文件与权限</small></label>
-    <div className={css.homeActions}>
-      {!plugin?.mcpConfigured && <button className={css.homePrimary} disabled={busy} onClick={() => void connect()}>{busy ? '连接中…' : '启用模型检索'}</button>}
-      <input ref={fileInput} type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple hidden onChange={event => void upload(event.target.files)}/>
-      <button onClick={openKnowledge}>浏览资料</button><button disabled={busy} onClick={() => fileInput.current?.click()}>上传知识</button><button onClick={openConsole}>管理知识库</button>
-    </div>
-    {notice && <p className={css.homeNotice}>{notice}</p>}
-  </section>
+  if (auth === null) {
+    return <section className={css.homeIntegration}><div className={css.homeLoading}>正在连接藏知知识库…</div></section>
+  }
+
+  const statusOk = Boolean(plugin?.mcpConfigured)
+  const authed = auth.authenticated
+  const triggerLabel = !authed
+    ? t('homeEntryLogin')
+    : statusOk
+      ? (workspace?.name ?? t('popoverStatusOnline'))
+      : (workspace?.name ?? t('popoverStatusOffline'))
+  const triggerSubtitle = !authed
+    ? t('popoverLoginHint')
+    : statusOk
+      ? t('popoverStatusOnline')
+      : t('popoverStatusOffline')
+
+  return <>
+    <section className={css.homeIntegration}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={css.homeEntry}
+        onClick={() => setOpen(value => !value)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <CangzhiMark size={26} />
+        <span className={css.homeEntryBody}>
+          <strong>{t('homeEntry')}</strong>
+          <small>{triggerSubtitle}</small>
+        </span>
+        <span className={css.homeEntryMeta}>
+          <span className={css.homeEntryDot} data-state={!authed ? 'off' : statusOk ? 'ok' : 'warn'} />
+          {triggerLabel}
+        </span>
+        <span className={css.homeEntryChevron} aria-hidden>{open ? '⌃' : '⌄'}</span>
+      </button>
+    </section>
+    {open && <KnowledgePopover
+      anchor={triggerRef.current}
+      auth={auth}
+      plugin={plugin}
+      workspace={workspace}
+      workspaces={workspaces}
+      busy={busy}
+      notice={notice}
+      t={t}
+      onClose={() => setOpen(false)}
+      onLogin={login}
+      onConnect={connect}
+      onDisconnect={disconnect}
+      onSwitchWorkspace={switchWorkspace}
+      onOpenLibrary={() => { setOpen(false); openKnowledge() }}
+      onOpenConsole={() => { setOpen(false); openConsole() }}
+    />}
+  </>
 }
 
-type KnowledgeDockProps = PropsRuntime<'conversation.input.dock'> & InjectFace<ConsoleFace>
+type KnowledgeDockProps = PropsRuntime<'conversation.input.dock'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function KnowledgeDock({ openKnowledge, inputActions }: KnowledgeDockProps) {
-  const [status, setStatus] = useState<PluginStatus | null>(null)
+function KnowledgeDock({ openKnowledge, openConsole, inputActions, t }: KnowledgeDockProps) {
+  const [auth, setAuth] = useState<AuthState | null>(null)
+  const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
-  const [expanded, setExpanded] = useState(false)
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [open, setOpen] = useState(false)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const session = useKnowledgeSession()
+
   const load = async () => {
-    const [statusResponse, workspaceResponse] = await Promise.all([
+    const [authResponse, statusResponse, workspaceResponse] = await Promise.all([
+      fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' }),
       fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
       fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
     ])
-    if (statusResponse.ok) setStatus(await statusResponse.json() as PluginStatus)
+    if (authResponse.ok) {
+      const authValue = await authResponse.json() as AuthState
+      setAuth(authValue)
+      if (authValue.authenticated) {
+        const workspacesResponse = await fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' })
+        if (workspacesResponse.ok) setWorkspaces(await workspacesResponse.json() as Workspace[])
+      }
+    }
+    if (statusResponse.ok) setPlugin(await statusResponse.json() as PluginStatus)
     if (workspaceResponse.ok) setWorkspace(await workspaceResponse.json() as Workspace)
   }
   useEffect(() => {
-    void load()
-    const update = () => { void load() }
+    void load().catch(() => { setNotice('藏知服务暂时不可用') })
+    const update = () => { void load().catch(() => { setNotice('藏知服务暂时不可用') }) }
     const useDocument = (event: Event) => {
       const detail = (event as CustomEvent<{ prompt?: string }>).detail
       if (typeof detail?.prompt === 'string') inputActions.setDraft(detail.prompt)
@@ -344,54 +763,129 @@ function KnowledgeDock({ openKnowledge, inputActions }: KnowledgeDockProps) {
       window.removeEventListener('cangzhi-use-document', useDocument)
     }
   }, [inputActions])
-  const suggestions = [
-    { label: '基于知识回答', prompt: '请优先检索当前藏知空间，基于找到的证据回答，并在关键结论后标注来源。\n\n' },
-    { label: '总结近期资料', prompt: '请列出当前藏知空间最近更新的资料，归纳核心主题，并附上来源。' },
-    { label: '对比多份资料', prompt: '请在当前藏知空间中寻找与以下主题相关的多份资料，对比它们的共同点、差异和依据：\n\n' },
-  ]
-  return <section className={css.knowledgeDock} data-expanded={String(expanded)}>
-    <div className={css.knowledgeDockTop}><CangzhiMark size={23}/><div className={css.knowledgeDockTitle}><span><strong>知识增强</strong><i data-ok={String(Boolean(status?.mcpConfigured))}/></span><small>{workspace?.name ?? status?.activeWorkspace ?? '默认空间'} · {status?.mcpConfigured ? '模型会主动检索并引用证据' : '尚未连接模型工具'}</small></div><button className={css.dockLibraryButton} onClick={openKnowledge}>搜资料</button><button className={css.dockToggle} aria-label={expanded ? '收起知识建议' : '展开知识建议'} onClick={() => setExpanded(value => !value)}>{expanded ? '⌃' : '⌄'}</button></div>
-    {expanded && <div className={css.knowledgePrompts}><span>试着这样问</span>{suggestions.map(item => <button key={item.label} disabled={!status?.mcpConfigured} onClick={() => inputActions.setDraft(item.prompt)}>{item.label}</button>)}</div>}
-  </section>
+
+  const login = async (username: string, password: string): Promise<void> => {
+    setBusy(true)
+    const response = await fetch(`${API}/auth/login`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    })
+    if (!response.ok) { setBusy(false); throw new Error(await errorMessage(response, '登录失败')) }
+    setBusy(false)
+    await load()
+  }
+  const connect = async () => {
+    setBusy(true); setNotice('正在创建 DSH 专用访问令牌…')
+    const tokenResponse = await fetch(`${API}/access-tokens`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'DSH 对话插件', scopes: ['knowledge:read', 'knowledge:search', 'knowledge:ask'] }),
+    })
+    if (!tokenResponse.ok) { setNotice(await errorMessage(tokenResponse, '令牌创建失败')); setBusy(false); return }
+    const { token } = await tokenResponse.json() as { token: string }
+    const setup = await fetch('/_cangzhi-plugin/token', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
+    })
+    setNotice(setup.ok ? '连接成功，藏知工具正在自动上线' : await errorMessage(setup, 'DSH 凭据写入失败'))
+    setBusy(false); await load()
+  }
+  const disconnect = async () => {
+    setBusy(true)
+    const response = await fetch('/_cangzhi-plugin/token', { method: 'DELETE' })
+    setNotice(response.ok ? '已断开 DSH 对话连接' : await errorMessage(response, '断开失败'))
+    setBusy(false); await load()
+  }
+  const switchWorkspace = async (slug: string) => {
+    const next = workspaces.find(item => item.slug === slug)
+    if (next === undefined || next.slug === workspace?.slug) return
+    setBusy(true)
+    try {
+      setWorkspaceCookie(next.slug)
+      await syncModelWorkspace(next.slug)
+      setWorkspace(next)
+      await load()
+    } finally { setBusy(false) }
+  }
+
+  const statusOk = Boolean(plugin?.mcpConfigured)
+  const authed = auth?.authenticated === true
+  const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : session.policy === 'always' ? t('popoverPolicyAlways') : t('popoverPolicyAuto')
+  const workspaceLabel = workspace?.name ?? plugin?.activeWorkspace ?? t('popoverWorkspace')
+
+  return <>
+    <section className={css.knowledgeDock}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className={css.knowledgeDockTrigger}
+        onClick={() => setOpen(value => !value)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+      >
+        <CangzhiMark size={20} />
+        <span className={css.knowledgeDockMeta}>
+          <strong>{t('dockEntry')}</strong>
+          <small>{workspaceLabel} · {policyLabel}</small>
+        </span>
+        <span className={css.knowledgeDockDot} data-state={!authed ? 'off' : statusOk ? 'ok' : 'warn'} />
+        <span className={css.knowledgeDockChevron} aria-hidden>{open ? '⌃' : '⌄'}</span>
+      </button>
+    </section>
+    {open && <KnowledgePopover
+      anchor={triggerRef.current}
+      auth={auth}
+      plugin={plugin}
+      workspace={workspace}
+      workspaces={workspaces}
+      busy={busy}
+      notice={notice}
+      t={t}
+      onClose={() => setOpen(false)}
+      onLogin={login}
+      onConnect={connect}
+      onDisconnect={disconnect}
+      onSwitchWorkspace={switchWorkspace}
+      onOpenLibrary={() => { setOpen(false); openKnowledge() }}
+      onOpenConsole={() => { setOpen(false); openConsole() }}
+    />}
+  </>
 }
 
-type ConversationKnowledgeHeaderProps = PropsRuntime<'conversation.session.header.actions'> & InjectFace<ConsoleFace>
+type ConversationKnowledgeHeaderProps = PropsRuntime<'conversation.session.header.actions'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function ConversationKnowledgeHeader({ openKnowledge }: ConversationKnowledgeHeaderProps) {
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
-  const [current, setCurrent] = useState<Workspace | null>(null)
+function ConversationKnowledgeHeader({ openKnowledge, t }: ConversationKnowledgeHeaderProps) {
   const [configured, setConfigured] = useState(false)
   const [activeSlug, setActiveSlug] = useState('default')
-  const [busy, setBusy] = useState(false)
-  const load = async () => {
-    const [statusResponse, listResponse, currentResponse] = await Promise.all([
-      fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
-      fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
-      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
-    ])
-    if (statusResponse.ok) {
-      const status = await statusResponse.json() as PluginStatus
-      setConfigured(status.mcpConfigured)
-      setActiveSlug(status.activeWorkspace ?? 'default')
-    }
-    if (listResponse.ok) setWorkspaces(await listResponse.json() as Workspace[])
-    if (currentResponse.ok) setCurrent(await currentResponse.json() as Workspace)
-  }
+  const [currentName, setCurrentName] = useState<string | null>(null)
+  const session = useKnowledgeSession()
   useEffect(() => {
+    const load = async () => {
+      const [statusResponse, workspaceResponse] = await Promise.all([
+        fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
+        fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+      ])
+      if (statusResponse.ok) {
+        const status = await statusResponse.json() as PluginStatus
+        setConfigured(status.mcpConfigured)
+        setActiveSlug(status.activeWorkspace ?? 'default')
+      }
+      if (workspaceResponse.ok) {
+        const workspace = await workspaceResponse.json() as Workspace
+        setCurrentName(workspace.name)
+      }
+    }
     void load()
     const update = () => { void load() }
     window.addEventListener('cangzhi-workspace-changed', update)
     return () => window.removeEventListener('cangzhi-workspace-changed', update)
   }, [])
-  const change = async (slug: string) => {
-    const next = workspaces.find(item => item.slug === slug)
-    if (next === undefined || next.slug === current?.slug) return
-    setBusy(true)
-    try { setWorkspaceCookie(slug); await syncModelWorkspace(slug); setCurrent(next) }
-    finally { setBusy(false) }
-  }
-  if (current === null) return <button className={css.conversationKnowledgeFallback} onClick={openKnowledge}><CangzhiMark size={18}/>{configured ? `藏知 · ${activeSlug}` : '连接藏知'}</button>
-  return <div className={css.conversationKnowledgeHeader} title="页面与模型工具会同步切换知识空间"><CangzhiMark size={18}/><i data-ok={String(configured)}/><span>知识空间</span><select value={current.slug} disabled={busy} onChange={event => void change(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select><button aria-label="搜索藏知资料" onClick={openKnowledge}>⌕</button></div>
+  const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : session.policy === 'always' ? t('popoverPolicyAlways') : t('popoverPolicyAuto')
+  const display = currentName ?? (configured ? activeSlug : t('popoverLoginTitle'))
+  return <button type="button" className={css.conversationKnowledgeHeader} title={t('popoverHeaderHint')} onClick={openKnowledge}>
+    <CangzhiMark size={18} />
+    <i data-ok={String(configured)} />
+    <span>{display} · {policyLabel}</span>
+    <span className={css.conversationKnowledgeChevron} aria-hidden>⌕</span>
+  </button>
 }
 
 type ConnectionSettings = { apiUrl: string; webUrl: string; defaultWorkspace: string }
@@ -487,7 +981,7 @@ function CangzhiSettingsTab({ settingsScope, t }: CangzhiSettingsTabProps) {
       if (ops.length > 0) await settingsScope.mutate(ops, snapshot.revision)
       await loadStatus()
       setMessage(t('settingsSaved'))
-    } catch { setMessage(t('settingsUnavailable')) }
+    } catch { setMessage(t('settingsSaveFailed')) }
     finally { setBusy(null) }
   }
 
@@ -514,7 +1008,7 @@ function CangzhiSettingsTab({ settingsScope, t }: CangzhiSettingsTabProps) {
     <p className={css.settingsRestart} data-pending={String(Boolean(status?.restartRequired))}>{status?.restartRequired ? t('settingsRestartPending') : t('settingsRestart')}</p>
     {unavailable && <p className={css.settingsMessage}>{t('settingsUnavailable')}</p>}
     {message && <p className={css.settingsMessage} role="status">{message}</p>}
-    <footer><button disabled={unavailable || busy !== null} onClick={() => void test()}>{busy === 'test' ? t('settingsTesting') : t('settingsTest')}</button><button data-primary="true" disabled={unavailable || busy !== null} onClick={() => void save()}>{busy === 'save' ? t('settingsSaving') : t('settingsSave')}</button></footer>
+    <footer><button type="button" disabled={unavailable || busy !== null} onClick={() => void test()}>{busy === 'test' ? t('settingsTesting') : t('settingsTest')}</button><button type="button" data-primary="true" disabled={unavailable || busy !== null} onClick={() => void save()}>{busy === 'save' ? t('settingsSaving') : t('settingsSave')}</button></footer>
   </section>
 }
 
@@ -1367,16 +1861,19 @@ export function apply(ctx: ClientContext): void {
 
   ctx.slots.inject('conversation.hero.context', () => ctx.slots.register({
     name: 'conversation.hero.context', id: 'cangzhi-home', order: 10,
+    locale: NS,
     inject: () => consoleFace,
   }, HomeIntegration))
 
   ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
     name: 'conversation.input.dock', id: 'cangzhi-context', order: -20,
+    locale: NS,
     inject: () => consoleFace,
   }, KnowledgeDock))
 
   ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
     name: 'conversation.session.header.actions', id: 'cangzhi-knowledge-space', order: 20,
+    locale: NS,
     inject: () => consoleFace,
   }, ConversationKnowledgeHeader))
 
