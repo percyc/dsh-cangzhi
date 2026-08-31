@@ -376,6 +376,7 @@
 .systemIssues > strong { flex: none; color: var(--dsw-alias-label-error); }
 .systemIssues ul { flex: 1; margin: 0; padding-left: 18px; }
 .systemIssues button { flex: none; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 6px 10px; background: var(--dsw-alias-button-ghost-fill); color: var(--dsw-alias-label-primary); font: inherit; cursor: pointer; }
+.systemIssueActions { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .quickActions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin-bottom: 16px; }
 .quickActions button { display: flex; align-items: center; gap: 11px; min-width: 0; min-height: 72px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; padding: 12px; background: var(--dsw-alias-bg-base); color: inherit; text-align: left; cursor: pointer; transition: border-color .15s ease, transform .15s ease, box-shadow .15s ease; }
 .quickActions button:hover { border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 38%, var(--dsw-alias-border-l2)); transform: translateY(-1px); box-shadow: var(--dsw-shadow-lv1); }

@@ -599,12 +599,41 @@ type SystemStatus = {
   uptime_seconds: number
   database: { status: string; latency_ms: number }
   storage: { status: string; total_bytes: number; used_bytes: number; free_bytes: number; used_percent: number }
-  processing: { active: number; waiting: number; failed: number }
+  processing: {
+    active: number
+    waiting: number
+    failed: number
+    failed_by_workspace?: Array<{
+      workspace_id: number
+      workspace_slug: string
+      workspace_name: string
+      workspace_status: 'active' | 'archived'
+      failed: number
+    }>
+  }
 }
 type SystemIssue =
   | { kind: 'database'; status: string }
   | { kind: 'storage'; usedPercent: number }
   | { kind: 'processing'; failed: number }
+type WorkspaceFailure = { slug: string; name: string; status: 'active' | 'archived'; count: number }
+
+async function loadWorkspaceFailure(workspace: Workspace): Promise<WorkspaceFailure | null> {
+  const limit = 200
+  let offset = 0
+  let failed = 0
+  while (true) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset), include_processing: 'true', workspace: workspace.slug })
+    const response = await fetch(`${API}/documents/overview?${params}`, { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) return null
+    const items = await response.json() as DocumentItem[]
+    failed += items.filter(document => statusOf(document) === 'failed').length
+    offset += items.length
+    const total = Number(response.headers.get('x-total-count') ?? offset)
+    if (items.length === 0 || offset >= total) break
+  }
+  return failed > 0 ? { slug: workspace.slug, name: workspace.name, status: workspace.status, count: failed } : null
+}
 
 function systemIssues(system: SystemStatus): SystemIssue[] {
   const issues: SystemIssue[] = []
@@ -617,7 +646,7 @@ function systemIssues(system: SystemStatus): SystemIssue[] {
 }
 
 function systemIssueText(issue: SystemIssue): string {
-  if (issue.kind === 'processing') return `${issue.failed} 份资料处理失败，请到资料库筛选“失败”并检查或重新处理`
+  if (issue.kind === 'processing') return `有 ${issue.failed} 份资料处理失败。请选择下方对应空间直接查看并处理。`
   if (issue.kind === 'storage') return `存储已使用 ${issue.usedPercent}%，请清理空间或扩容（告警阈值 90%）`
   return `数据库状态为 ${issue.status}`
 }
@@ -668,11 +697,13 @@ function NativeWorkspace() {
   const [documents, setDocuments] = useState<DocumentItem[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [workspaceFailures, setWorkspaceFailures] = useState<WorkspaceFailure[]>([])
   const [currentWorkspace, setCurrentWorkspace] = useState<Workspace | null>(null)
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
+  const [documentStatus, setDocumentStatus] = useState('')
   const refresh = async () => {
     setLoading(true); setError('')
     try {
@@ -693,10 +724,25 @@ function NativeWorkspace() {
         setDocuments(await documentResponse.json() as DocumentItem[])
         setTotal(Number(documentResponse.headers.get('x-total-count') ?? 0))
         setCategories(await categoryResponse.json() as Category[])
-        setWorkspaces(await workspacesResponse.json() as Workspace[])
+        const nextWorkspaces = await workspacesResponse.json() as Workspace[]
+        setWorkspaces(nextWorkspaces)
         const current = await currentWorkspaceResponse.json() as Workspace
         setCurrentWorkspace(current)
-        if (systemResponse.ok) setSystemStatus(await systemResponse.json() as SystemStatus)
+        if (systemResponse.ok) {
+          const nextSystem = await systemResponse.json() as SystemStatus
+          setSystemStatus(nextSystem)
+          if (nextSystem.processing.failed_by_workspace !== undefined) {
+            setWorkspaceFailures(nextSystem.processing.failed_by_workspace.map(item => ({
+              slug: item.workspace_slug,
+              name: item.workspace_name,
+              status: item.workspace_status,
+              count: item.failed,
+            })))
+          } else {
+            const failureResults = await Promise.all(nextWorkspaces.filter(item => item.status === 'active').map(loadWorkspaceFailure))
+            setWorkspaceFailures(failureResults.filter((item): item is WorkspaceFailure => item !== null))
+          }
+        }
         await syncModelWorkspace(current.slug)
       }
     } catch (caught) { setError(caught instanceof Error ? caught.message : '藏知服务不可用') }
@@ -712,12 +758,22 @@ function NativeWorkspace() {
       setWorkspaceCookie(next.slug)
       await syncModelWorkspace(next.slug)
       setCurrentWorkspace(next ?? null)
+      setDocumentStatus('')
       setTab('overview')
       await refresh()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '知识空间切换失败')
       setLoading(false)
     }
+  }
+  const openWorkspaceFailures = async (item: WorkspaceFailure) => {
+    if (item.status === 'archived') {
+      setTab('spaces')
+      return
+    }
+    await switchWorkspace(item.slug)
+    setDocumentStatus('failed')
+    setTab('documents')
   }
   if (loading && auth === null) return <div className={css.centerState}>正在连接藏知…</div>
   if (auth !== null && !auth.authenticated) return <LoginPanel onAuthenticated={() => void refresh()} />
@@ -739,9 +795,9 @@ function NativeWorkspace() {
     <main className={css.workspaceMain}>
       <div className={css.pageHeader}><div><span className={css.pageEyebrow}>{currentWorkspace?.name ?? '知识空间'}</span><h2>{tab === 'overview' ? '知识工作台' : tab === 'search' ? '搜索知识' : tab === 'documents' ? '资料库' : tab === 'create' ? '快速收录' : tab === 'upload' ? '上传资料' : tab === 'categories' ? '分类管理' : tab === 'spaces' ? '知识空间' : '对话接入'}</h2><p>{tab === 'overview' ? `你好，${auth?.admin?.username ?? '管理员'}。从这里开始沉淀、整理和使用知识。` : currentWorkspace?.description || '当前操作仅作用于所选知识空间'}</p></div><div className={css.headerActions}><button className={css.refreshButton} disabled={loading} onClick={() => void refresh()}>{loading ? '刷新中…' : '刷新'}</button><button className={css.refreshButton} onClick={() => void logout()}>退出</button></div></div>
       {error && <div className={css.errorBanner}>{error}</div>}
-      {tab === 'overview' && <Overview documents={documents} categories={categories} total={total} mcp={plugin?.mcpConfigured ?? false} workspace={currentWorkspace} system={systemStatus} go={setTab} />}
+      {tab === 'overview' && <Overview documents={documents} categories={categories} total={total} mcp={plugin?.mcpConfigured ?? false} workspace={currentWorkspace} system={systemStatus} workspaceFailures={workspaceFailures} go={setTab} openFailures={openWorkspaceFailures} />}
       {tab === 'search' && <KnowledgeSearch />}
-      {tab === 'documents' && <Documents documents={documents} categories={categories} query={query} setQuery={setQuery} refresh={refresh} />}
+      {tab === 'documents' && <Documents documents={documents} categories={categories} query={query} setQuery={setQuery} status={documentStatus} setStatus={setDocumentStatus} refresh={refresh} />}
       {tab === 'create' && <CreateKnowledge refresh={refresh} done={() => setTab('documents')} />}
       {tab === 'upload' && <Upload refresh={refresh} done={() => setTab('documents')} />}
       {tab === 'categories' && <Categories categories={categories} refresh={refresh} />}
@@ -764,7 +820,7 @@ function formatUptime(seconds: number): string {
   return `${Math.max(1, Math.floor(seconds / 60))} 分钟`
 }
 
-function Overview({ documents, categories, total, mcp, workspace, system, go }: { documents: DocumentItem[]; categories: Category[]; total: number; mcp: boolean; workspace: Workspace | null; system: SystemStatus | null; go(tab: Tab): void }) {
+function Overview({ documents, categories, total, mcp, workspace, system, workspaceFailures, go, openFailures }: { documents: DocumentItem[]; categories: Category[]; total: number; mcp: boolean; workspace: Workspace | null; system: SystemStatus | null; workspaceFailures: WorkspaceFailure[]; go(tab: Tab): void; openFailures(item: WorkspaceFailure): Promise<void> }) {
   const processing = documents.filter(item => ['processing', 'created', 'retry'].includes(item.pipeline?.overall_status ?? item.current_version?.processing_status ?? '')).length
   const issues = system === null ? [] : systemIssues(system)
   return <>
@@ -777,7 +833,7 @@ function Overview({ documents, categories, total, mcp, workspace, system, go }: 
     {system && <section className={css.systemStatus} data-state={system.status}>
       <div className={css.systemStatusTitle}><span/><div><strong>服务器状态</strong><small>{issues.length === 0 ? '藏知运行正常' : `${issues.length} 项异常`}</small></div></div>
       <dl><div><dt>API 运行</dt><dd>{formatUptime(system.uptime_seconds)}</dd></div><div data-warning={String(system.database.status !== 'ok')}><dt>数据库</dt><dd>{system.database.status === 'ok' ? `${system.database.latency_ms} ms` : system.database.status}</dd></div><div data-warning={String(system.storage.status !== 'ok' || system.storage.used_percent >= 90)}><dt>存储</dt><dd>{system.storage.used_percent}% 已用 · {formatCapacity(system.storage.free_bytes)} 可用</dd></div><div><dt>处理队列</dt><dd>{system.processing.active} 处理中 · {system.processing.waiting} 等待</dd></div>{system.processing.failed > 0 && <div data-warning="true"><dt>处理失败</dt><dd>{system.processing.failed} 项</dd></div>}</dl>
-      {issues.length > 0 && <div className={css.systemIssues} role="status"><strong>异常原因</strong><ul>{issues.map(issue => <li key={issue.kind}>{systemIssueText(issue)}</li>)}</ul>{issues.some(issue => issue.kind === 'processing') && <button onClick={() => go('documents')}>打开资料库</button>}</div>}
+      {issues.length > 0 && <div className={css.systemIssues} role="status"><strong>异常原因</strong><ul>{issues.map(issue => <li key={issue.kind}>{systemIssueText(issue)}</li>)}</ul>{issues.some(issue => issue.kind === 'processing') && <div className={css.systemIssueActions}>{workspaceFailures.map(item => <button key={item.slug} title={item.status === 'archived' ? '该空间已归档，点击前往知识空间管理' : '切换空间并只显示失败资料'} onClick={() => void openFailures(item)}>{item.name}（{item.count}）{item.status === 'archived' ? ' · 已归档' : ''}</button>)}{workspaceFailures.length === 0 && <button onClick={() => go('spaces')}>检查知识空间</button>}</div>}</div>}
     </section>}
     <div className={css.quickActions}>
       <button onClick={() => go('upload')}><span>⇧</span><div><strong>上传资料</strong><small>批量添加文件并自动解析</small></div><b>→</b></button>
@@ -811,9 +867,8 @@ function DocumentRows({ documents, refresh, categories = [], compact = false }: 
   </div>)}</div>
 }
 
-function Documents({ documents, categories, query, setQuery, refresh }: { documents: DocumentItem[]; categories: Category[]; query: string; setQuery(value: string): void; refresh(): Promise<unknown> }) {
+function Documents({ documents, categories, query, setQuery, status, setStatus, refresh }: { documents: DocumentItem[]; categories: Category[]; query: string; setQuery(value: string): void; status: string; setStatus(value: string): void; refresh(): Promise<unknown> }) {
   const [categoryId, setCategoryId] = useState('')
-  const [status, setStatus] = useState('')
   const visible = documents.filter(item => {
     const matchesQuery = item.title.toLowerCase().includes(query.trim().toLowerCase())
     const matchesCategory = categoryId === '' || item.primary_category?.id === Number(categoryId)
