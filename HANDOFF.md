@@ -12,7 +12,7 @@ DSH 基座只提供通用扩展槽位。`conversation.hero.context` 属于通用
 
 - Host：`src/index.ts` 注册同源 Web/API 网关、控制接口、系统提示和回环 MCP 凭据代理。
 - Client：`src/client/plugin.tsx` 提供首页接入、知识空间切换、管理中心、知识工作台和 MCP 结果卡片。
-- 对话知识能力 UI：新建会话页只挂载轻量入口（`HomeIntegration`），由 Popover 提供关闭/自动/始终使用、知识空间切换、连接和断开；不再常驻展示大区域。
+- 对话知识能力 UI：新建会话页只挂载轻量入口（`HomeIntegration`），输入区和会话头部提供同一 Popover；“本对话使用藏知”按 DSH `sessionId` 控制模型能力，关闭时 Host 在 Agent 作用域隐藏提示词并拒绝 14 个藏知 MCP 工具。
 - 资料抽屉（`KnowledgeWorkbench`）和管理中心（`ConsoleOverlay`）保持可用，从 Popover 底部入口进入。
 - 配置：服务 URL 与默认空间注册到 DSH 原生设置；显式环境变量覆盖并锁定对应字段；内部 MCP 端口只从部署环境读取。
 - 构建：`tsdown.config.ts` 通过 `DSH_SOURCE` 使用 DSH 的 Client preset；产物保存在 `lib/`。
@@ -51,14 +51,14 @@ npm run check
 6. 切换空间后下一次 MCP 调用使用新空间；
 7. PAT 断开后 MCP 返回未配置，不泄漏历史 token。
 8. 未设置连接环境变量时，可在“设置 → 插件 → 藏知”保存配置，重启后生效；显式设置环境变量时对应字段只读。
-9. 新建对话只出现一个轻量入口，点击后弹出 Popover；Popover 顶部带“进程共享”徽标，离开页面再回来设置保持一致。
-10. 在 Popover 内切换“关闭/自动/始终使用”后，对话头部的副文本同步更新；新浏览器标签页打开 DSH 也会读取到同一浏览器偏好（当前不会撤销已注册工具）。
+9. 新建对话只出现一个轻量入口，点击后弹出 Popover；有活动对话时显示“本对话使用藏知”，开关按当前 `sessionId` 生效。
+10. 在 Popover 内切换“关闭/开启”后，Host 对该 Agent 的下一次模型步骤应用对应的提示词和工具限制；切换其他会话不会串用策略。
 11. 资料抽屉和管理中心均可从 Popover 底部按钮进入，原有功能未缺失。
 
 ## 已知限制
 
-- 当前活动知识空间由一个 DSH 进程共享，不是按浏览器用户或会话隔离。`useKnowledgeSession` 通过 `cangzhi:session:*` localStorage key 跟踪“本浏览器”的策略（关闭/自动/始终使用）和当前空间 cookie，但**这只在本浏览器内有效**；同一 DSH 进程下的多个浏览器用户共享同一 `activeWorkspaceSlug`。面向多用户部署前，应将空间选择绑定到 DSH 会话/身份上下文。
-- Host 的 `activeWorkspaceSlug` 是进程级变量；客户端的“关闭/自动/始终使用”目前只是本浏览器偏好展示，**不会撤销已注册的 MCP 工具，也不会改变 Host 的静态 system prompt**。不能阻止同一 DSH 进程下的其他浏览器用户读到同一空间。Popover 顶部固定显示“进程共享”徽标，并在策略块下方写明 `popoverScopeGlobal` 文案，避免被误认为是 DSH 后端隔离。
+- 当前活动知识空间由一个 DSH 进程共享，不是按浏览器用户或会话隔离。面向多用户部署前，应将空间选择绑定到 DSH 会话/身份上下文。
+- “本对话使用藏知”已经是 Host 侧真实策略；策略变更只影响下一次模型步骤，不会取消正在执行的工具调用。没有活动会话的首页入口仅作为连接/空间管理入口。
 - 完整首页接入依赖通用 `conversation.hero.context` 槽位；旧 DSH 只能使用其已有槽位中的功能。新 Popover 入口通过 `conversation.input.dock`（`KnowledgeDock`）和 `conversation.session.header.actions`（`ConversationKnowledgeHeader`）挂载，即使 `hero.context` 未声明，弹层与切换能力仍能工作。
 - Client 文案已分中英两套字典并由 `ctx.locale.register('cangzhi', { zh, en })` 注入，但部分运维提示（如“正在创建 DSH 专用访问令牌…”）仍硬编码中文。
 - 构建仍依赖本地 DSH preset；发布时应保留并校验已构建的 `lib/`。

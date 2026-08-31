@@ -6,12 +6,14 @@ import Schema from '@deepseek-ai/schemastery'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import type { SettingsNamespace, SettingsScope } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { createProxyHandler } from './proxy.ts'
 
 export const name = 'cangzhi'
-export const inject = ['systemPrompt', 'webServer', 'connection', 'credentials', 'settings']
+export const inject = ['systemPrompt', 'webServer', 'connection', 'credentials', 'settings', 'agents']
 
 export interface Config {
   webUrl: string
@@ -42,6 +44,22 @@ const CONTROL_ROUTE_PREFIX = '/_cangzhi-plugin'
 const DEFAULT_MCP_PORT = 3081
 const WORKSPACE_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/
 const SETTINGS_NAMESPACE = 'cangzhi' as SettingsNamespace
+const CANGZHI_TOOLS = [
+  'mcp__cangzhi__knowledge_list_scopes',
+  'mcp__cangzhi__knowledge_list_facets',
+  'mcp__cangzhi__knowledge_list_documents',
+  'mcp__cangzhi__knowledge_search',
+  'mcp__cangzhi__knowledge_ask',
+  'mcp__cangzhi__knowledge_get_document',
+  'mcp__cangzhi__knowledge_get_chunk',
+  'mcp__cangzhi__knowledge_list_datasets',
+  'mcp__cangzhi__knowledge_get_dataset_schema',
+  'mcp__cangzhi__knowledge_preview_dataset_rows',
+  'mcp__cangzhi__knowledge_query_dataset',
+  'mcp__cangzhi__knowledge_get_evidence_by_chunk',
+  'mcp__cangzhi__knowledge_get_evidence_by_dataset',
+  'mcp__cangzhi__knowledge_preview_evidence_rows',
+] as const
 const ConnectionSettingsSchema: Schema<ConnectionSettings> = Schema.object({
   apiUrl: Schema.string(),
   webUrl: Schema.string(),
@@ -205,6 +223,47 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     order: 155,
     text: GUIDANCE,
   })
+  type SessionPolicy = { disposePrompt: () => void; disposeRestriction: () => void }
+  const sessionPolicies = new Map<string, SessionPolicy>()
+  const desiredPolicies = new Map<string, boolean>()
+  const applySessionPolicy = (agent: { id: string; ctx: Context }, enabled: boolean): void => {
+    const previous = sessionPolicies.get(agent.id)
+    previous?.disposePrompt()
+    previous?.disposeRestriction()
+    if (enabled) {
+      sessionPolicies.delete(agent.id)
+      return
+    }
+    const disposePrompt = agent.ctx.systemPrompt.section({
+      // A scoped empty section shadows the global guidance for this session.
+      name: 'integration:cangzhi',
+      order: 155,
+      text: '',
+    })
+    const disposeRestriction = agent.ctx.tools.restrict({ deny: [...CANGZHI_TOOLS] })
+    sessionPolicies.set(agent.id, { disposePrompt, disposeRestriction })
+  }
+  ctx.on('agent/created', ({ agent }) => {
+    const parentId = agent.session.header.parentSession
+    const enabled = desiredPolicies.get(agent.id)
+      ?? (parentId !== undefined && desiredPolicies.get(parentId) === false ? false : true)
+    desiredPolicies.set(agent.id, enabled)
+    applySessionPolicy(agent, enabled)
+  })
+  ctx.on('agent/disposed', ({ agent }) => {
+    const policy = sessionPolicies.get(agent.id)
+    policy?.disposePrompt()
+    policy?.disposeRestriction()
+    sessionPolicies.delete(agent.id)
+  })
+  ctx.effect(() => () => {
+    for (const policy of sessionPolicies.values()) {
+      policy.disposePrompt()
+      policy.disposeRestriction()
+    }
+    sessionPolicies.clear()
+    desiredPolicies.clear()
+  }, 'cangzhi session knowledge policy cleanup')
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: WEB_ROUTE_PREFIX,
@@ -288,6 +347,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       }
     },
   }), 'cangzhi workspace selection')
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: `${CONTROL_ROUTE_PREFIX}/session-policy`,
+    handler: async (req, res) => {
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+      try {
+        const body = await jsonBody(req)
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        if (sessionId.length === 0 || sessionId.length > 256) throw new Error('会话标识无效')
+        if (typeof body.enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
+        desiredPolicies.set(sessionId, body.enabled)
+        const agent = (ctx.agents.get as unknown as (id: string) => { id: string; ctx: Context } | undefined)(sessionId)
+        if (agent !== undefined) applySessionPolicy(agent, body.enabled)
+        res.writeHead(204, { 'cache-control': 'no-store' })
+        res.end()
+      } catch (error) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+      }
+    },
+  }), 'cangzhi session knowledge policy')
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: `${CONTROL_ROUTE_PREFIX}/token`,

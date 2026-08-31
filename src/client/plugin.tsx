@@ -59,19 +59,17 @@ const zh = {
   popoverStatus: '服务状态',
   popoverStatusOnline: '已连接',
   popoverStatusOffline: '未连接',
-  popoverPolicy: '知识能力偏好',
-  popoverPolicyHint: '用于记录当前浏览器的使用偏好；后端会话隔离完成后才会真正按对话生效。',
+  popoverPolicy: '本对话使用藏知',
+  popoverPolicyHint: '控制本对话是否允许模型调用藏知知识工具。关闭后，模型不会看到或调用藏知工具。',
   popoverPolicyOff: '关闭',
-  popoverPolicyAuto: '自动',
-  popoverPolicyAlways: '始终使用',
-  popoverPolicyOffHint: '当前版本仅记录偏好，不会撤销 DSH 已注册的模型工具',
-  popoverPolicyAutoHint: '当前版本保持默认行为；后端隔离后由模型按问题决定是否调用',
-  popoverPolicyAlwaysHint: '当前版本保持默认行为；后端隔离后会声明空间并优先检索',
+  popoverPolicyOn: '开启',
+  popoverPolicyOffHint: '关闭后，从下一次模型步骤开始不再提供藏知工具。',
+  popoverPolicyOnHint: '开启后，本对话可以按需调用藏知工具。',
   popoverWorkspace: '当前知识空间',
   popoverWorkspaceHint: '切换后模型工具立即使用新空间',
   popoverLoginFailed: '登录失败，请检查账号密码后重试',
-  popoverScopeNote: '会话级：仅本对话',
-  popoverScopeGlobal: '进程级：所有 DSH 浏览器共享',
+  popoverScopeNote: '仅对当前对话生效',
+  popoverScopeGlobal: '当前没有可绑定的对话',
   popoverConnect: '启用模型检索',
   popoverDisconnect: '断开 DSH 对话连接',
   popoverOpenLibrary: '打开资料抽屉',
@@ -155,19 +153,17 @@ const en = {
   popoverStatus: 'Service status',
   popoverStatusOnline: 'Connected',
   popoverStatusOffline: 'Not connected',
-  popoverPolicy: 'Knowledge preference',
-  popoverPolicyHint: 'Records this browser’s preference. It will apply per conversation after backend session isolation is implemented.',
+  popoverPolicy: 'Use Cangzhi in this conversation',
+  popoverPolicyHint: 'Controls whether this conversation may call Cangzhi knowledge tools. When off, the model cannot see or call them.',
   popoverPolicyOff: 'Off',
-  popoverPolicyAuto: 'Auto',
-  popoverPolicyAlways: 'Always',
-  popoverPolicyOffHint: 'This version records the preference but does not revoke DSH-registered model tools.',
-  popoverPolicyAutoHint: 'Default behavior for now; after backend isolation the model will decide when to call tools.',
-  popoverPolicyAlwaysHint: 'Default behavior for now; after backend isolation the active workspace will be emphasized.',
+  popoverPolicyOn: 'On',
+  popoverPolicyOffHint: 'After the next model step, Cangzhi tools will no longer be offered.',
+  popoverPolicyOnHint: 'This conversation may call Cangzhi tools when useful.',
   popoverWorkspace: 'Active knowledge workspace',
   popoverWorkspaceHint: 'The new selection is used by the next MCP call immediately.',
   popoverLoginFailed: 'Login failed. Check your username and password and try again.',
-  popoverScopeNote: 'Per conversation',
-  popoverScopeGlobal: 'Process wide: shared by every DSH browser tab',
+  popoverScopeNote: 'Applies only to this conversation',
+  popoverScopeGlobal: 'No conversation is selected',
   popoverConnect: 'Enable model retrieval',
   popoverDisconnect: 'Disconnect DSH conversation',
   popoverOpenLibrary: 'Open material drawer',
@@ -294,9 +290,9 @@ async function syncModelWorkspace(slug: string): Promise<void> {
   window.dispatchEvent(new CustomEvent('cangzhi-workspace-changed', { detail: { slug } }))
 }
 
-type KnowledgePolicy = 'off' | 'auto' | 'always'
+type KnowledgePolicy = 'off' | 'on'
 
-const POLICY_VALUES: readonly KnowledgePolicy[] = ['off', 'auto', 'always']
+const POLICY_VALUES: readonly KnowledgePolicy[] = ['off', 'on']
 const POLICY_STORAGE_PREFIX = 'cangzhi:session:'
 const POLICY_EVENT = 'cangzhi-policy-changed'
 
@@ -318,7 +314,7 @@ function loadSessionKey(): string {
 function loadPolicy(sessionKey: string): KnowledgePolicy {
   let value: string | null = null
   try { value = window.localStorage.getItem(`${POLICY_STORAGE_PREFIX}${sessionKey}:policy`) } catch { /* storage may be unavailable */ }
-  return isKnowledgePolicy(value) ? value : 'auto'
+  return isKnowledgePolicy(value) ? value : 'on'
 }
 
 function savePolicy(sessionKey: string, policy: KnowledgePolicy): void {
@@ -334,29 +330,27 @@ interface KnowledgeSessionState {
 }
 
 /**
- * Per-browser knowledge policy hook. The active policy and the localStorage
- * key that scopes it live entirely in the caller's browser; the value is
- * surfaced to other DSH browser tabs only through the `storage` event. This
- * is NOT real session isolation: the Host's `activeWorkspaceSlug` is still
- * process-wide, and the UI always labels the policy as `scope: 'process'`.
- * Do not remove the badge or the `popoverScopeGlobal` copy that names the
- * limitation explicitly.
+ * Per-conversation knowledge policy. The browser keeps the last choice for
+ * the DSH session id, while the Host applies the actual scoped prompt/tool
+ * restriction. A root-level surface has no session id and is only a visual
+ * fallback; the session header and dock are the authoritative controls.
  */
-function useKnowledgeSession(): KnowledgeSessionState {
-  const [sessionKey, setSessionKey] = useState<string>(() => loadSessionKey())
+function useKnowledgeSession(sessionId?: string): KnowledgeSessionState {
+  const [sessionKey, setSessionKey] = useState<string>(() => sessionId ?? loadSessionKey())
   const [policy, setPolicyState] = useState<KnowledgePolicy>(() => loadPolicy(sessionKey))
+  useEffect(() => {
+    const nextKey = sessionId ?? loadSessionKey()
+    setSessionKey(nextKey)
+    setPolicyState(loadPolicy(nextKey))
+  }, [sessionId])
   useEffect(() => {
     const refresh = (event: Event) => {
       const detail = (event as CustomEvent<{ sessionKey?: string; policy?: KnowledgePolicy }>).detail
-      if (detail?.sessionKey !== undefined && detail.sessionKey !== sessionKey) {
-        setSessionKey(detail.sessionKey)
-        setPolicyState(isKnowledgePolicy(detail.policy) ? detail.policy : 'auto')
-        return
-      }
+      if (detail?.sessionKey !== undefined && detail.sessionKey !== sessionKey) return
       setPolicyState(loadPolicy(sessionKey))
     }
     const storage = (event: StorageEvent) => {
-      if (event.key === `${POLICY_STORAGE_PREFIX}key`) {
+      if (sessionId === undefined && event.key === `${POLICY_STORAGE_PREFIX}key`) {
         const next = loadSessionKey()
         setSessionKey(next)
         setPolicyState(loadPolicy(next))
@@ -370,16 +364,24 @@ function useKnowledgeSession(): KnowledgeSessionState {
       window.removeEventListener(POLICY_EVENT, refresh)
       window.removeEventListener('storage', storage)
     }
-  }, [sessionKey])
+  }, [sessionId, sessionKey])
   const setPolicy = (next: KnowledgePolicy): void => {
     if (next === policy) return
     setPolicyState(next)
     savePolicy(sessionKey, next)
+    if (sessionId !== undefined) {
+      void fetch('/_cangzhi-plugin/session-policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId, enabled: next === 'on' }),
+      }).catch(() => { /* the next model step will report a disconnected Host */ })
+    }
   }
-  return { sessionKey, policy, scope: 'process', setPolicy }
+  return { sessionKey, policy, scope: sessionId === undefined ? 'process' : 'conversation', setPolicy }
 }
 
 interface KnowledgePopoverProps {
+  sessionId?: string
   anchor: HTMLElement | null
   auth: AuthState | null
   plugin: PluginStatus | null
@@ -398,8 +400,8 @@ interface KnowledgePopoverProps {
 }
 
 function KnowledgePopover(props: KnowledgePopoverProps) {
-  const { anchor, auth, plugin, workspace, workspaces, onClose, onLogin, onConnect, onDisconnect, onSwitchWorkspace, onOpenLibrary, onOpenConsole, busy, notice, t } = props
-  const session = useKnowledgeSession()
+  const { sessionId, anchor, auth, plugin, workspace, workspaces, onClose, onLogin, onConnect, onDisconnect, onSwitchWorkspace, onOpenLibrary, onOpenConsole, busy, notice, t } = props
+  const session = useKnowledgeSession(sessionId)
   const [position, setPosition] = useState<{ top: number; left: number; placement: 'top' | 'bottom' } | null>(null)
   const [loginPending, setLoginPending] = useState(false)
   const [loginError, setLoginError] = useState('')
@@ -466,8 +468,7 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
   const statusText = statusOk ? t('popoverStatusOnline') : t('popoverStatusOffline')
   const policyOptions: ReadonlyArray<{ value: KnowledgePolicy; label: string; hint: string }> = [
     { value: 'off', label: t('popoverPolicyOff'), hint: t('popoverPolicyOffHint') },
-    { value: 'auto', label: t('popoverPolicyAuto'), hint: t('popoverPolicyAutoHint') },
-    { value: 'always', label: t('popoverPolicyAlways'), hint: t('popoverPolicyAlwaysHint') },
+    { value: 'on', label: t('popoverPolicyOn'), hint: t('popoverPolicyOnHint') },
   ]
   const policyHint = policyOptions.find(option => option.value === session.policy)?.hint ?? ''
   const showLogin = auth !== null && !auth.authenticated
@@ -492,7 +493,9 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
       <header className={css.popoverHeader}>
         <CangzhiMark size={22} />
         <strong>{t('popoverTitle')}</strong>
-        <span className={css.popoverScopeBadge} data-global={String(true)}>{t('popoverScopeBadgeGlobal')}</span>
+        <span className={css.popoverScopeBadge} data-global={String(session.scope === 'process')}>
+          {session.scope === 'conversation' ? t('popoverScopeBadge') : t('popoverScopeBadgeGlobal')}
+        </span>
         <button type="button" className={css.popoverClose} aria-label={t('popoverClose')} onClick={onClose}>×</button>
       </header>
 
@@ -519,7 +522,7 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
           ))}
         </div>
         <p className={css.popoverHint}>{policyHint}</p>
-        <p className={css.popoverScopeNote}>{t('popoverScopeGlobal')}</p>
+        <p className={css.popoverScopeNote}>{session.scope === 'conversation' ? t('popoverScopeNote') : t('popoverScopeGlobal')}</p>
       </section>
 
       {showLogin ? (
@@ -721,7 +724,7 @@ function HomeIntegration({ openConsole, openKnowledge, t }: HomeIntegrationProps
 
 type KnowledgeDockProps = PropsRuntime<'conversation.input.dock'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function KnowledgeDock({ openKnowledge, openConsole, inputActions, t }: KnowledgeDockProps) {
+function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, t }: KnowledgeDockProps) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
@@ -730,7 +733,7 @@ function KnowledgeDock({ openKnowledge, openConsole, inputActions, t }: Knowledg
   const [notice, setNotice] = useState('')
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const session = useKnowledgeSession()
+  const session = useKnowledgeSession(sessionId)
 
   const load = async () => {
     const [authResponse, statusResponse, workspaceResponse] = await Promise.all([
@@ -808,7 +811,7 @@ function KnowledgeDock({ openKnowledge, openConsole, inputActions, t }: Knowledg
 
   const statusOk = Boolean(plugin?.mcpConfigured)
   const authed = auth?.authenticated === true
-  const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : session.policy === 'always' ? t('popoverPolicyAlways') : t('popoverPolicyAuto')
+  const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : t('popoverPolicyOn')
   const workspaceLabel = workspace?.name ?? plugin?.activeWorkspace ?? t('popoverWorkspace')
 
   return <>
@@ -831,6 +834,7 @@ function KnowledgeDock({ openKnowledge, openConsole, inputActions, t }: Knowledg
       </button>
     </section>
     {open && <KnowledgePopover
+      sessionId={sessionId}
       anchor={triggerRef.current}
       auth={auth}
       plugin={plugin}
@@ -852,11 +856,11 @@ function KnowledgeDock({ openKnowledge, openConsole, inputActions, t }: Knowledg
 
 type ConversationKnowledgeHeaderProps = PropsRuntime<'conversation.session.header.actions'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function ConversationKnowledgeHeader({ openKnowledge, t }: ConversationKnowledgeHeaderProps) {
+function ConversationKnowledgeHeader({ sessionId, openKnowledge, t }: ConversationKnowledgeHeaderProps) {
   const [configured, setConfigured] = useState(false)
   const [activeSlug, setActiveSlug] = useState('default')
   const [currentName, setCurrentName] = useState<string | null>(null)
-  const session = useKnowledgeSession()
+  const session = useKnowledgeSession(sessionId)
   useEffect(() => {
     const load = async () => {
       const [statusResponse, workspaceResponse] = await Promise.all([
@@ -878,7 +882,7 @@ function ConversationKnowledgeHeader({ openKnowledge, t }: ConversationKnowledge
     window.addEventListener('cangzhi-workspace-changed', update)
     return () => window.removeEventListener('cangzhi-workspace-changed', update)
   }, [])
-  const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : session.policy === 'always' ? t('popoverPolicyAlways') : t('popoverPolicyAuto')
+  const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : t('popoverPolicyOn')
   const display = currentName ?? (configured ? activeSlug : t('popoverLoginTitle'))
   return <button type="button" className={css.conversationKnowledgeHeader} title={t('popoverHeaderHint')} onClick={openKnowledge}>
     <CangzhiMark size={18} />
