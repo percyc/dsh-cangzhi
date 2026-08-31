@@ -98,3 +98,9 @@
   - `tests/session-policy.test.mjs` 在测试中复刻了 `applySessionPolicy` 而非调用 `src/index.ts` 内的实现，仅起到库契约回归作用；若要在测试中覆盖生产代码，需要把策略管理拆成独立模块并提供构建产物供 `node --test` 直接 import。本轮不改。
   - `ctx.agents.get/list` 的返回类型（公开 `Agent` 仅含 `id`）与运行期形态（`ctx` + `session`）不一致，现有 `as unknown as` 断言在 DSH 0.1.2-alpha.1 内可工作，但缺少正式类型桥接。
   - `body.applied === false`（agent 尚未创建）目前只在返回值中反映，未被 `handlePolicyChange` 消费。Host 端 `desiredPolicies` 已正确存盘，子代理在 `agent/created` 时会回放，模型最终会受限；只是 Client 没有“待生效”提示。
+
+## 2026-08-31：数据表预览改为分页并统一字号
+
+- **问题**：数据表预览固定只请求前 100 行，无法查看较大的数据集；表格单元格字号仍使用 9px，明显小于 DSH 的正文/控件字号。
+- **实现**：改为服务端分页请求，默认每页 50 行，支持 25/50/100/200 行切换、上一页/下一页和当前页范围提示；分页请求继续携带 `offset`/`limit`，不会一次性加载完整数据集。表格和分页控件统一到 DSH 的 13px/20px 控件正文尺度。
+- **验证**：重新构建、Node 语法检查和 `git diff --check` 通过。

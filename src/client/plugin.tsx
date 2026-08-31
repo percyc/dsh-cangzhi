@@ -1627,6 +1627,8 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
 type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
 type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
 type WorkbenchTab = 'browse' | 'preview' | 'context'
+type PreviewTable = { datasetId: number; columns: string[]; rows: Array<Record<string, unknown>>; total: number; offset: number; limit: number }
+const PREVIEW_PAGE_SIZE = 50
 
 function formatPreviewValue(value: unknown): string {
   if (value === null || value === undefined) return ''
@@ -1662,7 +1664,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   const [pinned, setPinned] = useState<WorkbenchDocument[]>([])
   const [previewUrl, setPreviewUrl] = useState('')
   const [previewText, setPreviewText] = useState('')
-  const [previewTable, setPreviewTable] = useState<{ columns: string[]; rows: Array<Record<string, unknown>>; total: number } | null>(null)
+  const [previewTable, setPreviewTable] = useState<PreviewTable | null>(null)
   const [previewState, setPreviewState] = useState('选择资料后可在这里预览原文')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
@@ -1674,6 +1676,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   const resizeStart = useRef({ x: 0, width: 480 })
   const widthRef = useRef(width)
   const workspaceSlugRef = useRef<string | null>(null)
+  const tableRequestRef = useRef(0)
   const load = async () => {
     const authResponse = await fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' })
     if (!authResponse.ok) throw new Error(await errorMessage(authResponse, '登录状态读取失败'))
@@ -1727,7 +1730,18 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     setTab('browse')
     setBusy(false)
   }
+  const loadDatasetRows = async (datasetId: number, offset: number, limit: number) => {
+    const requestId = ++tableRequestRef.current
+    setBusy(true)
+    const rowsResponse = await fetch(`${API}/datasets/${datasetId}/rows?offset=${offset}&limit=${limit}`, { credentials: 'include', cache: 'no-store' })
+    if (requestId !== tableRequestRef.current) return
+    if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return }
+    const rows = await rowsResponse.json() as { columns?: string[]; rows?: Array<Record<string, unknown>>; total?: number }
+    setPreviewTable({ datasetId, columns: rows.columns ?? [], rows: rows.rows ?? [], total: rows.total ?? rows.rows?.length ?? 0, offset, limit })
+    setPreviewState(''); setBusy(false)
+  }
   const preview = async (item: WorkbenchDocument) => {
+    tableRequestRef.current += 1
     setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
     const isDataset = item.content_kind === 'dataset' || item.dataset_id !== undefined || /\.(xlsx?|xls)$/iu.test(item.title)
@@ -1737,11 +1751,8 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
       const datasets = await datasetsResponse.json() as Array<{ id: number; name: string; sheet_name: string }>
       const dataset = item.dataset_id === undefined ? datasets[0] : datasets.find(candidate => candidate.id === item.dataset_id)
       if (dataset === undefined) { setPreviewState('数据表尚未生成可预览的数据集'); setBusy(false); return }
-      const rowsResponse = await fetch(`${API}/datasets/${dataset.id}/rows?offset=0&limit=100`, { credentials: 'include', cache: 'no-store' })
-      if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return }
-      const rows = await rowsResponse.json() as { columns?: string[]; rows?: Array<Record<string, unknown>>; total?: number }
-      setPreviewTable({ columns: rows.columns ?? [], rows: rows.rows ?? [], total: rows.total ?? rows.rows?.length ?? 0 })
-      setPreviewState(''); setBusy(false); return
+      await loadDatasetRows(dataset.id, 0, PREVIEW_PAGE_SIZE)
+      return
     }
     const detailResponse = await fetch(`${API}/documents/${item.id}`, { credentials: 'include', cache: 'no-store' })
     if (detailResponse.ok) {
@@ -1755,6 +1766,10 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     if (!response.ok) { setPreviewState(await errorMessage(response, '这份资料暂时没有可用预览')); setBusy(false); return }
     const blob = await response.blob()
     setPreviewUrl(URL.createObjectURL(blob)); setPreviewState(''); setBusy(false)
+  }
+  const changeTablePage = (offset: number, limit = previewTable?.limit ?? PREVIEW_PAGE_SIZE) => {
+    if (previewTable === null || offset < 0 || offset >= previewTable.total || busy) return
+    void loadDatasetRows(previewTable.datasetId, offset, limit)
   }
   useEffect(() => {
     const open = (event: Event) => {
@@ -1812,7 +1827,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
     {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
-      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <pre className={css.markdownPreview}>{previewText}</pre> : previewTable ? <div className={css.tablePreview}><p>共 {previewTable.total} 行，显示前 {previewTable.rows.length} 行</p><div><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
+      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <pre className={css.markdownPreview}>{previewText}</pre> : previewTable ? <div className={css.tablePreview}><p>共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
       {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>当前对话知识</strong><small>模型使用“{workspace?.name ?? '当前空间'}”，你还可以固定重点资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未固定资料。到“资料”中搜索并预览，然后点击“加入对话”。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请综合当前对话中固定的藏知资料，归纳共同结论、分歧与依据，并逐条标注来源。\n\n' } }))}>综合固定资料</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
     </>}
     {notice && <p className={css.workbenchNotice}>{notice}</p>}
