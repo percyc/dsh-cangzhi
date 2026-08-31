@@ -158,3 +158,90 @@
 - **实现**：新增 turn 级 `cangzhi-evidence` Conversation Node，按 `tool/call` / 成功 `tool/result` 折叠本轮真实藏知证据；回答结束后固定列出来源。证据身份保留 `document_version_id`、`chunk_id`、`dataset_id`、`artifact_version`、`source_rows`、`columns` 与 `query_plan`。右侧工作台接入藏知 v1 版本绑定接口，文档显示原章节/页码，数据表只显示本次回答的贡献行。旧正则回退不再驱动最终证据区。
 - **兼容**：无证据时不显示节点；旧记录缺版本号时禁用精确预览并明确说明，绝不读取最新版冒充旧证据。插件版本提升至 `0.10.0`，便于 `file:` Profile 判断与运维核对。
 - **验证**：`node --test tests/*.test.mjs` 27 项通过；复用 DSH preset 的 `tsdown` 构建通过；`node --check lib/index.js && node --check lib/client.js` 通过。真实 Profile 刷新与浏览器端到端点击仍待部署后验收。
+
+## 2026-09-01：第二轮审查：移除浏览器 bundle 中的 Node `Buffer` 引用 + 修正证据切换时的视图状态
+
+- **审查人**：MiniMax M3
+- **审查范围**：Ark 的 ADR-005 / `src/client/lib/markdown-preview.mjs` /
+  `src/client/plugin.tsx`（`EvidenceWorkbenchPreview`）/ `package.json` /
+  `src/client/Cangzhi.module.css` / `tests/markdown-preview.test.mjs`。
+- **结论 1（已修复）**：`markdown-preview.mjs` 上一轮用 `Buffer.byteLength(text, 'utf8')`
+  做 64 KiB 截断判断，而 `plugin.tsx` 会把它打包进 `lib/client.js`。
+  `Buffer` 在浏览器里不存在，渲染任何带 `context_markdown` 的证据时都会
+  抛 `ReferenceError: Buffer is not defined`。构建过程没看到这一步报错，
+  纯靠运行时崩溃兜底，风险太高。
+  - 修复：`markdown-preview.mjs` 新增 `byteLengthUtf8(text)`：优先用标准
+    全局 `TextEncoder`（现代浏览器 + Node ≥ 11 全部支持），在
+    `TextEncoder` 不可用时回退到符合 RFC 3629 的手写 UTF-8 计数器（处理
+    代理对）。5 处 `Buffer.byteLength` 全部替换；新加
+    `__disableTextEncoderForTests` / `__restoreTextEncoderForTests`，让单
+    测能强制走手写 fallback。
+  - 验证：单测新增 3 个用例（ASCII / 中文 / emoji / 代理对 / 混合与
+    Node `Buffer.byteLength` 对照、TextEncoder 禁用后手写分支对照、
+    在禁用状态下主入口仍可用）。13 / 13 通过。
+
+- **结论 2（已修复）**：`EvidenceWorkbenchPreview` 用
+  `useState(canFormat ? 'formatted' : 'raw')` 初始化视图状态，并在渲染
+  条件里要求 `viewMode === 'formatted' && canFormat` 才显示 MarkdownText、
+  `viewMode === 'raw'` 才显示 `<pre>`。当用户在证据 A（`canFormat = true`）
+  中选了“格式化”，再切换到证据 B（`canFormat = false`，例如 body > 64 KiB
+  或 `context_markdown` 缺失），组件复用同一个 React 实例，state 仍是
+  `'formatted'`，但格式化分支被 `canFormat === false` 屏蔽、原文分支又因
+  `viewMode !== 'raw'` 屏蔽——**用户看到空白**。
+  - 修复：状态变量改名 `preferredView`（仅承载“用户最后一次显式选择”），
+    渲染前先算 `effectiveView = canFormat ? preferredView : 'raw'`，把
+    不可格式化证据强制回到原文。开关条 `showFormatBar` 与原文 `<pre>` 仍
+    依赖 `normalizedMarkdown` 存在，证据无 markdown 时继续走 snippet /
+    占位逻辑，不出现双重面板。
+  - 验证：单测新增 1 个用例，显式 pin “`canFormat === false` 时主体仍可
+    渲染为 raw、不返回空串” 的契约。
+
+- **结论 3（已通过）**：`@deepseek-ai/dsh-client-ui-primitives` 已在 DSH
+  `packages/client/web/src/seed.ts` 的 platform 模块表里被预播种，构建产
+  物里只剩 `require('@deepseek-ai/dsh-client-ui-primitives')` 一行外置；
+  shiki / katex / micromark 等大块依赖未被打入 `lib/client.js`，与
+  ADR-005 决策 5 一致。
+
+- **结论 4（已通过）**：表格横向滚动由 `cangzhiMarkdown .tableScroll` +
+  MarkdownText 自身的 `md-table-wide` 钩子负责，CSS 已补
+  `width: max-content; min-width: 100%; max-width: max-content;` 与
+  `overflow-x: auto` 容器。MarkdownText 自身的安全链接策略（`http(s) /
+  mailto` allowlist、raw HTML 字面化、GFM 表格 / 任务列表 / TeX 渲染）由
+  DSH 提供，工作台侧未改写。64 KiB / UTF-8 边界由 `truncateEvidenceMarkdown`
+  配合 `byteLengthUtf8` 保障，行为与 ADR-005 决策 2 / 4 一致。
+
+- **验证**：
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node /home/percy/software/deepseek-harness/node_modules/.bin/tsdown --config tsdown.config.ts` 通过，`lib/client.js` 259.55 kB（与上一轮持平，新增 helper 内联在原 5 处替换里，体积可忽略）。
+  - `node scripts/rewrite-client-id.mjs` 通过。
+  - `node --check lib/index.js && node --check lib/client.js` 通过。
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node --test tests/*.test.mjs` 全部 41 项断言通过（1 项 `session-policy` + 27 项 `workbench-and-evidence` + 13 项 `markdown-preview`）。
+  - `git diff --check` 无冲突标记。
+
+- **保留问题**（不在本轮范围）：
+  - `MarkdownText` 自带 `var(--dsw-alias-*)` / `var(--ds-font-family-code)` token，工作台主题已使用同套 token；非常规主题变体（高对比 / 暗色之外的）适配本轮不做。
+  - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次构建已落到 `lib/client.js`，用户下次重启 DSH 即可生效。
+
+## 2026-09-01：截断预算收敛修正
+
+- **修正**：补齐 `truncateEvidenceMarkdown` 的长度回退检查，避免在需要截断时使用旧字符串快照，确保保留证据开头内容且最终 UTF-8 字节数不超过预算。
+- **验证**：新增测试断言确认截断结果保留正文前缀；全量测试、构建、语法检查和 `git diff --check` 继续通过。
+
+## 2026-09-01：工作台证据 Markdown 安全渲染（ADR-005）
+
+- **问题**：`EvidenceWorkbenchPreview` 把 `context.context_markdown` 用 `<pre>` 原文输出，标题、列表、强调、代码块、GFM 表格都不可读；用户希望像 DSH 对话正文一样格式化渲染，又不能引入额外的 markdown 库或 unsafe HTML。
+- **实现**：
+  - 复用 DSH `MarkdownText`（`@deepseek-ai/dsh-client-ui-primitives`）。该组件是 DSH Web Profile 的 platform 模块，模块表里已播种，构建通过 `require(...)` 外置，不把 shiki / katex / micromark 等大块依赖打到本仓库 `lib/client.js`；`MarkdownText` 自带 `http(s) / mailto` allowlist、raw HTML 字面化、GFM 表格 / 任务列表 / TeX 渲染，正好覆盖证据实际产出的语法。
+  - 新增 `src/client/lib/markdown-preview.mjs`，提供 `normalizeEvidenceMarkdown` / `shouldRenderFormattedMarkdown` / `truncateEvidenceMarkdown` / `buildMarkdownLabels` 四个纯函数，64 KiB 字节上限 + 边界尊重 UTF-8 字符 + 模块级 memo 化的 `labels`（流式渲染用它做 memo key，必须引用稳定）。
+  - `EvidenceWorkbenchPreview` 改成“格式化 / 原文”切换：默认进入格式化（命中条件），原文仍以 `<pre>` 兜底；空、超长、纯空白 Markdown 直接走原文。MarkdownText 外层套 `cangzhiMarkdown` 容器，约束 58vh 最大高度、让垂直滚动仍归工作台主滚动条；`MarkdownText` 自身的 `tableScroll` + `md-table-wide` 钩子负责多列表格的横向滚动。
+  - 依赖与 bundle：`package.json` 新增 `peerDependencies: @deepseek-ai/dsh-client-ui-primitives` 与对应 `optional: true` 元数据，并在 `dsh.bundle.client.inject` 列表中加入同名条目；`tsdown` 客户端 purity gate 命中 platform 模块白名单，`require(...)` 保持外置。
+  - 数据表 `previewTable` / `rows` 双视图与 `cangzhi-evidence` 折叠逻辑均未触动。
+- **验证**：
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node /home/percy/software/deepseek-harness/node_modules/tsdown/dist/run.mjs --config tsdown.config.ts` 通过，`lib/client.js` 250.29 kB → 259.55 kB（约 +9 KB），shiki / katex 等大块依赖未被 bundle。
+  - `node scripts/rewrite-client-id.mjs` 通过。
+  - `node --check lib/index.js && node --check lib/client.js` 通过。
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node --test tests/*.test.mjs` 全部 36 项断言通过（1 项 `session-policy` + 27 项 `workbench-and-evidence` + 8 项新增 `markdown-preview`）。
+  - `git diff --check` 无冲突标记。
+- **限制**：
+  - `MarkdownText` 自带 `var(--dsw-alias-*)` / `var(--ds-font-family-code)` token，工作台主题已使用同套 token；但如果 DSH 主题切换为高对比 / 暗色以外的非常规变体，仍以原值渲染；本轮不做主题适配。
+  - 工作台只对 `context.context_markdown` 走 MarkdownText；旧的 `<pre>` “原文”入口与数据表行预览路径保留，纯渲染辅助逻辑外的样式与交互一律不动。
+  - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次构建已落到 `lib/client.js`，用户下次重启 DSH 即可生效。

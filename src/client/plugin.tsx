@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './Cangzhi.module.css'
 import {
   WORKBENCH_SIZE_MIN,
@@ -33,6 +34,12 @@ import {
   formatEvidenceLink,
   idNumber,
 } from './lib/evidence.mjs'
+import {
+  buildMarkdownLabels,
+  normalizeEvidenceMarkdown,
+  shouldRenderFormattedMarkdown,
+  truncateEvidenceMarkdown,
+} from './lib/markdown-preview.mjs'
 
 const NS = 'cangzhi'
 const API = '/_dsh-cangzhi-api'
@@ -1681,13 +1688,29 @@ function EvidenceWorkbenchPreview({ context, rows }: { context: EvidenceContextP
   const columns = rows === null ? [] : ['row_number', ...(rows.columns ?? []).filter(column => column !== 'row_number')]
   const preview = evidenceAssetUrl(context.preview_url)
   const original = evidenceAssetUrl(context.original_url)
+  const normalizedMarkdown = useMemo(() => normalizeEvidenceMarkdown(context.context_markdown), [context.context_markdown])
+  const markdownLabels = useMemo(() => buildMarkdownLabels(), [])
+  const canFormat = shouldRenderFormattedMarkdown(normalizedMarkdown)
+  // Track the user's last *express* preference. The effective view drops back
+  // to 'raw' whenever the evidence cannot be formatted (empty / oversized /
+  // whitespace-only), so we never leave the user staring at a blank panel
+  // after switching evidence.
+  const [preferredView, setPreferredView] = useState<'formatted' | 'raw'>('formatted')
+  const effectiveView: 'formatted' | 'raw' = canFormat ? preferredView : 'raw'
+  const showFormatBar = Boolean(normalizedMarkdown) && canFormat
+  const truncatedMarkdown = useMemo(
+    () => effectiveView === 'formatted' ? truncateEvidenceMarkdown(normalizedMarkdown) : normalizedMarkdown,
+    [normalizedMarkdown, effectiveView],
+  )
   return <div className={css.exactEvidencePreview}>
     <div className={css.exactEvidenceMeta}><span>版本绑定证据</span><small>document_version_id {context.document_version_id}{context.page ? ` · 第 ${context.page} 页` : ''}</small></div>
     {context.heading_path && context.heading_path.length > 0 && <p className={css.exactEvidencePath}>{context.heading_path.join(' / ')}</p>}
-    {context.context_markdown && <pre className={css.markdownPreview}>{context.context_markdown}</pre>}
-    {!context.context_markdown && context.snippet && <blockquote>{context.snippet}</blockquote>}
+    {showFormatBar && <div className={css.markdownFormatBar} role="tablist" aria-label="证据 Markdown 渲染模式"><button type="button" role="tab" aria-selected={effectiveView === 'formatted'} className={css.markdownFormatButton} data-active={effectiveView === 'formatted'} onClick={() => setPreferredView('formatted')}>格式化</button><button type="button" role="tab" aria-selected={effectiveView === 'raw'} className={css.markdownFormatButton} data-active={effectiveView === 'raw'} onClick={() => setPreferredView('raw')}>原文</button></div>}
+    {normalizedMarkdown && effectiveView === 'formatted' && <div className={css.cangzhiMarkdown} data-cangzhi-markdown="evidence"><MarkdownText text={truncatedMarkdown} labels={markdownLabels} /></div>}
+    {normalizedMarkdown && effectiveView === 'raw' && <pre className={css.markdownPreview}>{normalizedMarkdown}</pre>}
+    {!normalizedMarkdown && context.snippet && <blockquote>{context.snippet}</blockquote>}
     {rows && <div className={css.tablePreview}><p>本次回答实际引用 {rows.returned ?? rows.rows?.length ?? 0} / {rows.requested ?? rows.rows?.length ?? 0} 行{rows.truncated ? '（受控截取）' : ''}</p><div className={css.tableScroll}><table><thead><tr>{columns.map(column => <th key={column}>{column === 'row_number' ? '原始行号' : column}</th>)}</tr></thead><tbody>{(rows.rows ?? []).map((row, index) => <tr key={String(row.row_number ?? index)}>{columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div></div>}
-    {!context.context_markdown && !context.snippet && !rows && <div className={css.previewPlaceholder}><span>▤</span><p>证据元数据已核验，但没有可显示的正文片段。</p></div>}
+    {!normalizedMarkdown && !context.snippet && !rows && <div className={css.previewPlaceholder}><span>▤</span><p>证据元数据已核验，但没有可显示的正文片段。</p></div>}
     {(preview || original) && <div className={css.evidenceAssetActions}>{preview && <button type="button" onClick={() => window.open(preview, '_blank', 'noopener,noreferrer')}>打开版本预览</button>}{original && <button type="button" onClick={() => window.open(original, '_blank', 'noopener,noreferrer')}>打开原文件</button>}</div>}
   </div>
 }
