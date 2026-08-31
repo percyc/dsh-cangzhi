@@ -2,6 +2,7 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -242,13 +243,15 @@ interface ConsoleSource {
 
 interface ConsoleFace {
   hooks: { cangzhiConsole: ConsoleSource }
+  currentSessionId(): string | undefined
+  subscribeSession(listener: () => void): () => void
   openConsole(): void
   closeConsole(): void
   openKnowledge(): void
   closeKnowledge(): void
 }
 
-function createConsoleFace(): ConsoleFace {
+function createConsoleFace(ctx: ClientContext): ConsoleFace {
   let snapshot: ConsoleSnapshot = { open: false, knowledgeOpen: false }
   const listeners = new Set<() => void>()
   const publish = (next: ConsoleSnapshot): void => {
@@ -265,6 +268,8 @@ function createConsoleFace(): ConsoleFace {
   }
   return {
     hooks: { cangzhiConsole: source },
+    currentSessionId: () => ctx.sessions.list.getSnapshot().current,
+    subscribeSession: listener => ctx.sessions.list.subscribe(listener),
     openConsole: () => { publish({ open: true, knowledgeOpen: false }) },
     closeConsole: () => { publish({ ...snapshot, open: false }) },
     openKnowledge: () => { publish({ open: false, knowledgeOpen: true }) },
@@ -577,7 +582,7 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
 
 type HomeIntegrationProps = InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function HomeIntegration({ openConsole, openKnowledge, t }: HomeIntegrationProps) {
+function HomeIntegration({ hooks, openConsole, openKnowledge, t }: HomeIntegrationProps) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
@@ -586,6 +591,7 @@ function HomeIntegration({ openConsole, openKnowledge, t }: HomeIntegrationProps
   const [notice, setNotice] = useState('')
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const sessionId = useSyncExternalStore(hooks.cangzhiConsole.subscribeSession, hooks.cangzhiConsole.currentSessionId)
 
   const load = async () => {
     const [authResponse, pluginResponse] = await Promise.all([
@@ -703,6 +709,7 @@ function HomeIntegration({ openConsole, openKnowledge, t }: HomeIntegrationProps
       </button>
     </section>
     {open && <KnowledgePopover
+      sessionId={sessionId}
       anchor={triggerRef.current}
       auth={auth}
       plugin={plugin}
@@ -1854,11 +1861,11 @@ function CangzhiToolCard({ toolName, block, inspect, t }: CangzhiToolProps) {
   )
 }
 
-export const inject = ['slots', 'locale', 'settingsScope']
+export const inject = ['slots', 'locale', 'settingsScope', 'sessions']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'cangzhi: dictionaries')
-  const consoleFace = createConsoleFace()
+  const consoleFace = createConsoleFace(ctx)
   const settingsFace: CangzhiSettingsFace = {
     settingsScope: ctx.settingsScope.bind<ConnectionSettings>({ namespace: NS }),
   }
