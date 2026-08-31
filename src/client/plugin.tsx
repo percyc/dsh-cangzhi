@@ -1425,7 +1425,7 @@ function Documents({ documents, categories, query, setQuery, status, setStatus, 
   return <section className={css.panel}><div className={css.libraryToolbar}><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索资料名称…"/><select value={categoryId} onChange={event => setCategoryId(event.target.value)}><option value="">全部分类</option>{categories.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><select value={status} onChange={event => setStatus(event.target.value)}><option value="">全部状态</option><option value="completed">已完成</option><option value="processing">处理中</option><option value="created">等待处理</option><option value="retry">等待重试</option><option value="failed">失败</option></select>{hasFilters && <button onClick={() => { setQuery(''); setCategoryId(''); setStatus('') }}>清除</button>}<span>{visible.length} / {documents.length} 条</span></div><DocumentRows documents={visible} categories={categories} refresh={refresh} /></section>
 }
 
-type SearchHit = { document_id: number; title: string; source_type: string; score: number; snippet: string; evidence_type?: string; categories?: Array<{ name: string }> }
+type SearchHit = { document_id: number; title: string; source_type: string; score: number; snippet: string; evidence_type?: string; dataset_id?: number; categories?: Array<{ name: string }> }
 
 function KnowledgeSearch() {
   const [query, setQuery] = useState('')
@@ -1625,7 +1625,7 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
 }
 
 type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
-type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; updated_at?: string; category?: string; snippet?: string }
+type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
 type WorkbenchTab = 'browse' | 'preview' | 'context'
 
 function formatPreviewValue(value: unknown): string {
@@ -1634,8 +1634,20 @@ function formatPreviewValue(value: unknown): string {
   return String(value)
 }
 
-function openDocumentInWorkbench(id: number, title: string): void {
-  window.dispatchEvent(new CustomEvent('cangzhi-open-document', { detail: { id, title } }))
+function openDocumentInWorkbench(id: number, title: string, datasetId?: number): void {
+  window.dispatchEvent(new CustomEvent('cangzhi-open-document', { detail: { id, title, datasetId } }))
+}
+
+function answerEvidence(answer: string): { documentId: number; datasetId: number; title: string } | null {
+  const dataset = /dataset[_ ]id\s*[=:：]?\s*(\d+)/iu.exec(answer)
+  const document = /document[_ ]id\s*[=:：]?\s*(\d+)/iu.exec(answer)
+  if (dataset === null || document === null) return null
+  const title = /文档《([^》]+)》/u.exec(answer)?.[1]?.trim() || '数据表证据'
+  const datasetId = Number(dataset[1])
+  const documentId = Number(document[1])
+  return Number.isSafeInteger(datasetId) && Number.isSafeInteger(documentId)
+    ? { documentId, datasetId, title }
+    : null
 }
 
 function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
@@ -1711,19 +1723,19 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     const response = await fetch(`${API}/search`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: query.trim(), limit: 40, offset: 0 }) })
     if (!response.ok) { setNotice(await errorMessage(response, '搜索失败')); setBusy(false); return }
     const body = await response.json() as { hits: SearchHit[] }
-    setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, content_kind: hit.evidence_type === 'dataset' ? 'dataset' : undefined, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
+    setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, content_kind: hit.evidence_type === 'dataset' ? 'dataset' : undefined, dataset_id: idNumber(hit.dataset_id) ?? undefined, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
     setTab('browse')
     setBusy(false)
   }
   const preview = async (item: WorkbenchDocument) => {
     setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
-    const isDataset = item.content_kind === 'dataset' || /\.(xlsx?|xls)$/iu.test(item.title)
+    const isDataset = item.content_kind === 'dataset' || item.dataset_id !== undefined || /\.(xlsx?|xls)$/iu.test(item.title)
     if (isDataset) {
       const datasetsResponse = await fetch(`${API}/datasets?document_id=${item.id}`, { credentials: 'include', cache: 'no-store' })
       if (!datasetsResponse.ok) { setPreviewState(await errorMessage(datasetsResponse, '数据表尚未完成解析，暂时无法预览')); setBusy(false); return }
       const datasets = await datasetsResponse.json() as Array<{ id: number; name: string; sheet_name: string }>
-      const dataset = datasets[0]
+      const dataset = item.dataset_id === undefined ? datasets[0] : datasets.find(candidate => candidate.id === item.dataset_id)
       if (dataset === undefined) { setPreviewState('数据表尚未生成可预览的数据集'); setBusy(false); return }
       const rowsResponse = await fetch(`${API}/datasets/${dataset.id}/rows?offset=0&limit=100`, { credentials: 'include', cache: 'no-store' })
       if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return }
@@ -1746,12 +1758,13 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   }
   useEffect(() => {
     const open = (event: Event) => {
-      const detail = (event as CustomEvent<{ id?: number; title?: string }>).detail
+      const detail = (event as CustomEvent<{ id?: number; title?: string; datasetId?: number }>).detail
       if (typeof detail?.id !== 'number') return
       const item = documents.find(document => document.id === detail.id) ?? {
         id: detail.id,
         title: detail.title?.trim() || `资料 #${detail.id}`,
         source_type: 'file',
+        ...(idNumber(detail.datasetId) === null ? {} : { content_kind: 'dataset', dataset_id: idNumber(detail.datasetId)! }),
       }
       openKnowledge()
       void preview(item)
@@ -1901,7 +1914,8 @@ function EvidencePreview({ tool, value }: { tool: string; value: Record<string, 
   }
   if (tool === 'knowledge_ask' && typeof payload.answer === 'string') {
     const citations = Array.isArray(payload.citations) ? payload.citations.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null).slice(0, 5) : []
-    return <div className={css.answerPreview}><p>{payload.answer.slice(0, 520)}</p>{citations.length > 0 && <div><span>引用 {citations.length}</span>{citations.map((citation, index) => { const documentId = idNumber(citation.document_id); return <button key={`${String(citation.document_id ?? citation.chunk_id)}:${index}`} disabled={documentId === null} onClick={() => { if (documentId !== null) openDocumentInWorkbench(documentId, String(citation.title ?? citation.document_title ?? '知识证据')) }}><b>{index + 1}</b>{String(citation.title ?? citation.document_title ?? '知识证据')}{documentId !== null ? ' · 右侧预览' : ''}</button> })}</div>}</div>
+    const inferred = answerEvidence(payload.answer)
+    return <div className={css.answerPreview}><p>{payload.answer.slice(0, 520)}</p>{citations.length > 0 && <div><span>引用 {citations.length}</span>{citations.map((citation, index) => { const documentId = idNumber(citation.document_id); const datasetId = idNumber(citation.dataset_id); return <button key={`${String(citation.document_id ?? citation.chunk_id)}:${index}`} disabled={documentId === null} onClick={() => { if (documentId !== null) openDocumentInWorkbench(documentId, String(citation.title ?? citation.document_title ?? '知识证据'), datasetId ?? undefined) }}><b>{index + 1}</b>{String(citation.title ?? citation.document_title ?? '知识证据')}{documentId !== null ? ' · 右侧预览' : ''}</button> })}</div>}{citations.length === 0 && inferred !== null && <button className={css.answerEvidenceButton} onClick={() => openDocumentInWorkbench(inferred.documentId, inferred.title, inferred.datasetId)}>打开数据表证据 · 右侧预览</button>}</div>
   }
   const preview = resultPreview(payload)
   return preview === null ? null : <p className={css.toolPreview}>{preview}</p>

@@ -848,6 +848,7 @@
 .answerPreview > div > span { flex: none; color: var(--dsw-alias-label-tertiary); font-size: 8px; }
 .answerPreview button { display: inline-flex; align-items: center; gap: 4px; min-width: 0; overflow: hidden; border: 1px solid var(--dsw-alias-border-l2); border-radius: 99px; padding: 3px 7px 3px 4px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-secondary); font: inherit; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .answerPreview button b { display: grid; place-items: center; flex: none; width: 14px; height: 14px; border-radius: 50%; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent); color: var(--dsw-alias-brand-primary); font-size: 7px; }
+.answerPreview .answerEvidenceButton { margin-top: 8px; border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-brand-primary); }
 
 .toolDetails {
   margin: 0 10px 9px 31px;
