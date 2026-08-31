@@ -41,7 +41,7 @@ DSH 浏览器
 ```bash
 cd /path/to/deepseek-harness
 pnpm dsh plugin --profile web add \
-  "git+ssh://git@gitea.example.com/team/dsh-cangzhi.git#v0.9.0"
+  "git+ssh://git@gitea.example.com/team/dsh-cangzhi.git#<release-tag-or-commit>"
 ```
 
 本地目录也可以直接安装：
@@ -51,6 +51,10 @@ export DSH_SOURCE=/path/to/deepseek-harness
 cd "$DSH_SOURCE"
 pnpm dsh plugin --profile web add file:/path/to/dsh-cangzhi
 ```
+
+注意：`file:` 会复制目录快照，源码更新后出现 `Already up to date` 不代表 Profile
+已拿到新构建。开发联调优先使用 `link:/path/to/dsh-cangzhi`；继续用 `file:` 时，先
+移除旧插件再重新添加。生产部署仍应固定 Git tag 或 commit SHA。
 
 本仓库开发时可使用脚本构建并重新安装：
 

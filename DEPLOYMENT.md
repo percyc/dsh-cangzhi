@@ -28,7 +28,7 @@
 ```bash
 export DSH_SOURCE=/opt/deepseek-harness
 export DSH_PROFILE=web
-export CANGZHI_PLUGIN_VERSION=v0.9.0
+export CANGZHI_PLUGIN_VERSION=<release-tag-or-commit>
 export CANGZHI_PLUGIN_SPEC="git+ssh://git@git.example.com/team/dsh-cangzhi.git#${CANGZHI_PLUGIN_VERSION}"
 ```
 
@@ -54,11 +54,11 @@ npm pack --dry-run
 
 ```bash
 git add .
-git commit -m "Release dsh-cangzhi v0.9.0"
+git commit -m "Release dsh-cangzhi <release-tag>"
 git branch -M main
 git push -u origin main
-git tag -a v0.9.0 -m "dsh-cangzhi v0.9.0"
-git push origin v0.9.0
+git tag -a <release-tag> -m "dsh-cangzhi <release-tag>"
+git push origin <release-tag>
 ```
 
 部署环境应固定 tag 或 commit SHA，不要直接依赖浮动的 `main` 分支。发布新版本时更新 `package.json` 中的版本号、重新生成并验证 `lib/`，再创建新标签；不要移动已经发布的标签。
@@ -226,11 +226,11 @@ name: '@deepseek-ai/dsh-mcp-client'
 
 ## 11. 升级与回滚
 
-先在插件仓库发布新版本，例如 `v0.9.1`，再在 DSH 机器执行：
+先在插件仓库发布新版本，再在 DSH 机器执行：
 
 ```bash
 cd "$DSH_SOURCE"
-pnpm dsh plugin --profile web add "git+ssh://git@git.example.com/team/dsh-cangzhi.git#v0.9.1"
+pnpm dsh plugin --profile web add "git+ssh://git@git.example.com/team/dsh-cangzhi.git#<new-release-tag>"
 ```
 
 重启 DSH 后执行第 10 节的验证。插件升级不应删除 DSH credentials，通常无需重新创建 PAT。
@@ -239,7 +239,7 @@ pnpm dsh plugin --profile web add "git+ssh://git@git.example.com/team/dsh-cangzh
 
 ```bash
 cd "$DSH_SOURCE"
-pnpm dsh plugin --profile web add "git+ssh://git@git.example.com/team/dsh-cangzhi.git#v0.9.0"
+pnpm dsh plugin --profile web add "git+ssh://git@git.example.com/team/dsh-cangzhi.git#<previous-release-tag>"
 ```
 
 不要通过强制移动 Git 标签完成回滚。
@@ -280,6 +280,19 @@ pnpm dsh web
 ```
 
 开发环境可以使用本地目录；生产环境应安装带 tag 或 commit SHA 的 Git 版本。
+
+`file:` 是 pnpm 的目录快照，不保证源码变化后再次执行 `add` 就刷新。如果命令显示
+`Already up to date`，但页面仍是旧功能，应移除后重新添加；需要边改边看的开发环境
+改用 `link:`：
+
+```bash
+cd "$DSH_SOURCE"
+pnpm dsh plugin --profile "$DSH_PROFILE" remove dsh-cangzhi
+pnpm dsh plugin --profile "$DSH_PROFILE" add "link:/path/to/dsh-cangzhi"
+```
+
+无论 `file:` 还是 `link:`，都必须先按上文构建出最新 `lib/`，然后重启 DSH。生产环境
+不要使用 `link:`，应固定 Git tag 或 commit SHA。
 
 插件目录不需要单独下载 DSH peer packages。仓库中的 `pnpm-workspace.yaml` 已设置 `autoInstallPeers: false`；不要删除该设置，也不要把 DSH 的预发布依赖改为从 npm 强制安装。
 

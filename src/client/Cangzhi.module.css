@@ -858,6 +858,30 @@
 .answerPreview .answerEvidenceButton { margin-top: 8px; border-color: color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, var(--dsw-alias-border-l2)); color: var(--dsw-alias-brand-primary); }
 .assistantEvidenceAction { height: 24px; border: 0; border-radius: 6px; padding: 0 7px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; }
 .assistantEvidenceAction:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-brand-primary); }
+.answerEvidenceNode { width: min(100%, 720px); box-sizing: border-box; margin: 8px 0 12px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 24%, var(--dsw-alias-border-l2)); border-radius: 12px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 3%, var(--dsw-alias-bg-base)); color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 20px; }
+.answerEvidenceNode > header { display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 12px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.answerEvidenceNode > header > span { color: var(--dsw-alias-brand-primary); }
+.answerEvidenceNode > header > strong { font-size: 13px; }
+.answerEvidenceNode > header > small { margin-left: auto; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.answerEvidenceNode article { display: flex; align-items: flex-start; gap: 10px; padding: 11px 12px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.answerEvidenceNode article:last-child { border-bottom: 0; }
+.answerEvidenceNode article > b { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border-radius: 7px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 11%, transparent); color: var(--dsw-alias-brand-primary); font-size: 12px; }
+.answerEvidenceNode article > div { flex: 1; min-width: 0; }
+.answerEvidenceNode article strong { display: block; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.answerEvidenceNode article p { display: -webkit-box; overflow: hidden; margin: 2px 0; color: var(--dsw-alias-label-secondary); font-size: 13px; line-height: 20px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.answerEvidenceNode article small { display: block; overflow: hidden; color: var(--dsw-alias-label-tertiary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.answerEvidenceNode article > button { flex: none; min-height: 30px; border: 1px solid color-mix(in srgb, var(--dsw-alias-brand-primary) 35%, var(--dsw-alias-border-l2)); border-radius: 8px; padding: 4px 9px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-brand-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.answerEvidenceNode article > button:disabled { border-color: var(--dsw-alias-border-l2); color: var(--dsw-alias-label-tertiary); cursor: not-allowed; }
+.exactEvidencePreview { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; padding: 14px; }
+.exactEvidenceMeta { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: none; margin-bottom: 8px; }
+.exactEvidenceMeta span { border-radius: 99px; padding: 3px 8px; background: color-mix(in srgb, var(--dsw-alias-brand-primary) 10%, transparent); color: var(--dsw-alias-brand-primary); font-size: 12px; }
+.exactEvidenceMeta small, .exactEvidencePath { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.exactEvidencePath { margin: 0 0 8px; }
+.exactEvidencePreview .markdownPreview { flex: none; max-height: 55vh; border: 1px solid var(--dsw-alias-border-l2); border-radius: 9px; font-family: inherit; font-size: 13px; line-height: 21px; }
+.exactEvidencePreview blockquote { margin: 0; border-left: 3px solid var(--dsw-alias-brand-primary); border-radius: 0 8px 8px 0; padding: 12px 14px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 21px; white-space: pre-wrap; }
+.exactEvidencePreview .tablePreview { flex: none; max-height: 58vh; padding: 0; }
+.evidenceAssetActions { display: flex; gap: 8px; margin-top: 12px; }
+.evidenceAssetActions button { border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 6px 10px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-brand-primary); cursor: pointer; }
 
 .toolDetails {
   margin: 0 10px 9px 31px;

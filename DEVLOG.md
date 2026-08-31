@@ -151,3 +151,10 @@
 - **问题**：模型在最终回答中使用“文档 387《指标数据更新明细》dataset_id=354”时，旧回退规则只识别 `document_id` / `文档 ID`，因此没有来源按钮；窄/标准/宽和全屏控件与拖拽重复，顶栏显得拥挤。
 - **实现**：文本证据解析改为独立提取文档与数据集编号，兼容自然语言、Markdown 加粗和先数据集后文档的顺序；接入 DSH `conversation.chat.assistant-actions`，在最终回答底部直接显示“来源”按钮并打开对应右侧数据表。移除档位/全屏按钮及其运行时状态，只保留 360–760px 拖拽和 `cangzhi-workbench-width` 记忆。
 - **验证**：新增两项文本证据回归用例，并通过完整构建、语法检查、单元测试和差异检查。
+
+## 2026-08-31：最终回答改用结构化、版本绑定的证据节点（ADR-004）
+
+- **背景**：最终回答的“来源”按钮仍依赖模型正文是否写出 ID；按钮打开的是当前文档或普通数据表预览，无法证明回答实际用了哪个版本、片段和原始行。
+- **实现**：新增 turn 级 `cangzhi-evidence` Conversation Node，按 `tool/call` / 成功 `tool/result` 折叠本轮真实藏知证据；回答结束后固定列出来源。证据身份保留 `document_version_id`、`chunk_id`、`dataset_id`、`artifact_version`、`source_rows`、`columns` 与 `query_plan`。右侧工作台接入藏知 v1 版本绑定接口，文档显示原章节/页码，数据表只显示本次回答的贡献行。旧正则回退不再驱动最终证据区。
+- **兼容**：无证据时不显示节点；旧记录缺版本号时禁用精确预览并明确说明，绝不读取最新版冒充旧证据。插件版本提升至 `0.10.0`，便于 `file:` Profile 判断与运维核对。
+- **验证**：`node --test tests/*.test.mjs` 27 项通过；复用 DSH preset 的 `tsdown` 构建通过；`node --check lib/index.js && node --check lib/client.js` 通过。真实 Profile 刷新与浏览器端到端点击仍待部署后验收。

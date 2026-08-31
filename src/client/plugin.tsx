@@ -5,6 +5,10 @@ import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-api-session-controller/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ToolCallViewProps } from '@deepseek-ai/dsh-client-ui-tool/client'
+import type {
+  ConversationNodeContext, ConversationNodeDefinition,
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ChatConversationViewNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
@@ -25,6 +29,8 @@ import {
   answerEvidence as answerEvidenceShared,
   collectStructuredEvidence,
   dedupeEvidenceLinks,
+  evidenceFromToolResult,
+  formatEvidenceLink,
   idNumber,
 } from './lib/evidence.mjs'
 
@@ -1642,6 +1648,21 @@ type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
 type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
 type WorkbenchTab = 'browse' | 'preview' | 'context'
 type PreviewTable = { datasetId: number; columns: string[]; rows: Array<Record<string, unknown>>; total: number; offset: number; limit: number }
+type EvidenceContextPayload = {
+  evidence_type: string
+  document_id: number
+  document_version_id: number
+  title: string
+  heading_path?: string[]
+  page?: number | null
+  snippet?: string
+  context_markdown?: string
+  preview_url?: string | null
+  original_url?: string | null
+  table_location?: Record<string, unknown>
+  dataset?: Record<string, unknown>
+}
+type EvidenceRowsPayload = { columns?: string[]; rows?: Array<Record<string, unknown>>; returned?: number; requested?: number; truncated?: boolean }
 const PREVIEW_PAGE_SIZE = 50
 
 function formatPreviewValue(value: unknown): string {
@@ -1650,15 +1671,119 @@ function formatPreviewValue(value: unknown): string {
   return String(value)
 }
 
+function evidenceAssetUrl(value: string | null | undefined): string | null {
+  if (!value) return null
+  if (value.startsWith('/api/')) return `${API}${value.slice(4)}`
+  return value
+}
+
+function EvidenceWorkbenchPreview({ context, rows }: { context: EvidenceContextPayload; rows: EvidenceRowsPayload | null }) {
+  const columns = rows === null ? [] : ['row_number', ...(rows.columns ?? []).filter(column => column !== 'row_number')]
+  const preview = evidenceAssetUrl(context.preview_url)
+  const original = evidenceAssetUrl(context.original_url)
+  return <div className={css.exactEvidencePreview}>
+    <div className={css.exactEvidenceMeta}><span>版本绑定证据</span><small>document_version_id {context.document_version_id}{context.page ? ` · 第 ${context.page} 页` : ''}</small></div>
+    {context.heading_path && context.heading_path.length > 0 && <p className={css.exactEvidencePath}>{context.heading_path.join(' / ')}</p>}
+    {context.context_markdown && <pre className={css.markdownPreview}>{context.context_markdown}</pre>}
+    {!context.context_markdown && context.snippet && <blockquote>{context.snippet}</blockquote>}
+    {rows && <div className={css.tablePreview}><p>本次回答实际引用 {rows.returned ?? rows.rows?.length ?? 0} / {rows.requested ?? rows.rows?.length ?? 0} 行{rows.truncated ? '（受控截取）' : ''}</p><div className={css.tableScroll}><table><thead><tr>{columns.map(column => <th key={column}>{column === 'row_number' ? '原始行号' : column}</th>)}</tr></thead><tbody>{(rows.rows ?? []).map((row, index) => <tr key={String(row.row_number ?? index)}>{columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div></div>}
+    {!context.context_markdown && !context.snippet && !rows && <div className={css.previewPlaceholder}><span>▤</span><p>证据元数据已核验，但没有可显示的正文片段。</p></div>}
+    {(preview || original) && <div className={css.evidenceAssetActions}>{preview && <button type="button" onClick={() => window.open(preview, '_blank', 'noopener,noreferrer')}>打开版本预览</button>}{original && <button type="button" onClick={() => window.open(original, '_blank', 'noopener,noreferrer')}>打开原文件</button>}</div>}
+  </div>
+}
+
 function openDocumentInWorkbench(id: number, title: string, datasetId?: number): void {
   window.dispatchEvent(new CustomEvent('cangzhi-open-document', { detail: { id, title, datasetId } }))
 }
 
 type EvidenceLink = {
   readonly documentId: number
+  readonly documentVersionId: number | null
+  readonly chunkId: number | null
   readonly datasetId: number | null
+  readonly artifactVersion: number | null
+  readonly evidenceType: string
   readonly title: string
   readonly snippet?: string
+  readonly page: number | null
+  readonly headingPath: readonly string[]
+  readonly sourceRows: readonly number[]
+  readonly columns: readonly string[]
+  readonly queryPlan?: Readonly<Record<string, unknown>>
+}
+
+interface CangzhiEvidenceChatData {
+  readonly evidence: readonly EvidenceLink[]
+}
+
+declare module '@deepseek-ai/dsh-client-ui-chat/client' {
+  interface ChatNodeDataMap {
+    'cangzhi-evidence': CangzhiEvidenceChatData
+  }
+}
+
+interface CangzhiEvidenceState {
+  readonly turn: number
+  readonly calls: ReadonlyMap<string, string>
+  readonly evidence: readonly EvidenceLink[]
+  readonly endSeq?: number
+}
+
+function cangzhiEvidenceLocation(context: ConversationNodeContext<CangzhiEvidenceState>) {
+  const location = context.start?.location ?? context.matches[0]?.location
+  return location?.kind === 'turn' || location?.kind === 'step' ? location.turn : undefined
+}
+
+/** Fold successful Cangzhi MCP results into one durable, turn-scoped source node. */
+const cangzhiEvidenceDefinition: ConversationNodeDefinition<CangzhiEvidenceState> = {
+  kind: 'cangzhi-evidence',
+  target: 'chat',
+  match: (event) => {
+    if (event.type === 'turn/start') return { id: String(event.data.turn), role: 'start' }
+    if (event.type === 'tool/call' || event.type === 'tool/result' || event.type === 'turn/end') {
+      return { id: String(event.data.turn), role: 'update' }
+    }
+    return null
+  },
+  start: (_context, match) => {
+    if (match.event.type !== 'turn/start') throw new Error('cangzhi evidence requires turn/start')
+    return { turn: match.event.data.turn, calls: new Map(), evidence: [] }
+  },
+  update: (context, match) => {
+    if (match.event.type === 'tool/call') {
+      const calls = new Map(context.state.calls)
+      calls.set(String(match.event.data.callId), match.event.data.name)
+      return { ...context.state, calls }
+    }
+    if (match.event.type === 'turn/end') {
+      return { ...context.state, endSeq: match.event.seq }
+    }
+    if (match.event.type !== 'tool/result') return context.state
+    const result = match.event.data.message.content[0]
+    if (result?.type !== 'tool-result' || result.isError === true) return context.state
+    const callId = String(match.event.data.message.source.callId)
+    const toolName = context.state.calls.get(callId)
+    if (toolName === undefined) return context.state
+    const found = evidenceFromToolResult(toolName, result.content) as EvidenceLink[]
+    if (found.length === 0) return context.state
+    return { ...context.state, evidence: dedupeEvidenceLinks([...context.state.evidence, ...found]) as EvidenceLink[] }
+  },
+  publication: match => match.event.type === 'turn/end' ? 'immediate' : 'none',
+  buildViewNode: (context): ChatConversationViewNode | null => {
+    const state = context.state
+    const location = cangzhiEvidenceLocation(context)
+    if (state === undefined || state.endSeq === undefined || state.evidence.length === 0 || location === undefined) return null
+    return {
+      key: context.key,
+      kind: 'cangzhi-evidence',
+      id: context.id,
+      target: 'chat',
+      anchorSeq: state.endSeq,
+      location,
+      visibility: 'visible',
+      data: { evidence: state.evidence },
+    }
+  },
 }
 
 function answerEvidence(answer: string): EvidenceLink | null {
@@ -1666,21 +1791,24 @@ function answerEvidence(answer: string): EvidenceLink | null {
   return answerEvidenceShared(answer) as EvidenceLink | null
 }
 
-type AssistantEvidenceActionProps = PropsRuntime<'conversation.chat.assistant-actions'>
+function openEvidenceInWorkbench(evidence: EvidenceLink): void {
+  window.dispatchEvent(new CustomEvent('cangzhi-open-evidence', { detail: evidence }))
+}
 
-function AssistantEvidenceAction({ messageId, useChat }: AssistantEvidenceActionProps) {
-  const answer = useChat(snapshot => {
-    for (const node of snapshot.nodes.values()) {
-      if (node.kind !== 'assistant-step') continue
-      if (node.data.finalNode?.messageId !== messageId) continue
-      return node.data.blocks.flatMap(block => block.kind === 'text' ? [block.text] : []).join('')
-    }
-    return ''
-  })
-  const evidence = answerEvidence(answer)
-  if (evidence === null) return null
-  const label = `打开来源证据：${evidence.title}`
-  return <button type="button" className={css.assistantEvidenceAction} aria-label={label} title={label} onClick={() => openDocumentInWorkbench(evidence.documentId, evidence.title, evidence.datasetId ?? undefined)}>▤ 来源</button>
+type CangzhiEvidenceNodeProps = PropsRuntime<'conversation.chat.node', 'cangzhi-evidence'>
+
+function CangzhiEvidenceNode({ node }: CangzhiEvidenceNodeProps) {
+  return <section className={css.answerEvidenceNode} aria-label={`回答证据 ${node.data.evidence.length} 条`}>
+    <header><span>▤</span><strong>回答证据</strong><small>{node.data.evidence.length} 条 · 来自本轮藏知工具结果</small></header>
+    <div>{node.data.evidence.map((evidence, index) => {
+      const exact = evidence.documentVersionId !== null && (evidence.chunkId !== null || evidence.datasetId !== null)
+      return <article key={`${evidence.chunkId ?? ''}:${evidence.datasetId ?? ''}:${evidence.documentVersionId ?? ''}:${index}`}>
+        <b>{index + 1}</b>
+        <div><strong>{evidence.title}</strong>{evidence.snippet && <p>{evidence.snippet.replace(/\s+/g, ' ').slice(0, 220)}</p>}<small>{formatEvidenceLink(evidence)}</small></div>
+        <button type="button" disabled={!exact} title={exact ? '在右侧查看生成答案时使用的原始证据' : '这条旧记录缺少版本信息'} onClick={() => openEvidenceInWorkbench(evidence)}>{exact ? '查看原始证据' : '缺少版本信息'}</button>
+      </article>
+    })}</div>
+  </section>
 }
 
 function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
@@ -1696,6 +1824,8 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   const [previewUrl, setPreviewUrl] = useState('')
   const [previewText, setPreviewText] = useState('')
   const [previewTable, setPreviewTable] = useState<PreviewTable | null>(null)
+  const [evidenceContext, setEvidenceContext] = useState<EvidenceContextPayload | null>(null)
+  const [evidenceRows, setEvidenceRows] = useState<EvidenceRowsPayload | null>(null)
   const [previewState, setPreviewState] = useState('选择资料后可在这里预览原文')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
@@ -1711,7 +1841,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     const authValue = await authResponse.json() as AuthState
     setAuth(authValue)
     if (!authValue.authenticated) {
-      setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null)
+      setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null)
       workspaceSlugRef.current = null
       return
     }
@@ -1727,7 +1857,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     const items = await documentsResponse.json() as DocumentItem[]
     setDocuments(items.map(item => ({ id: item.id, title: item.title, source_type: item.source_type, content_kind: item.content_kind, updated_at: item.updated_at, category: item.primary_category?.name })))
     if (workspaceChanged) {
-      setQuery(''); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setTab('browse')
+      setQuery(''); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setTab('browse')
       setPreviewState('选择资料后可在这里预览原文')
     }
   }
@@ -1772,7 +1902,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   }
   const preview = async (item: WorkbenchDocument) => {
     tableRequestRef.current += 1
-    setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setBusy(true)
+    setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
     const isDataset = item.content_kind === 'dataset' || item.dataset_id !== undefined || /\.(xlsx?|xls)$/iu.test(item.title)
     if (isDataset) {
@@ -1801,6 +1931,37 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     if (previewTable === null || offset < 0 || offset >= previewTable.total || busy) return
     void loadDatasetRows(previewTable.datasetId, offset, limit)
   }
+  const previewEvidence = async (evidence: EvidenceLink) => {
+    if (evidence.documentVersionId === null) {
+      setPreviewState('这条历史证据缺少 document_version_id，无法安全地用当前最新版替代。')
+      return
+    }
+    tableRequestRef.current += 1
+    setSelected({ id: evidence.documentId, title: evidence.title, source_type: 'file', ...(evidence.datasetId === null ? {} : { content_kind: 'dataset', dataset_id: evidence.datasetId }) })
+    setTab('preview'); setPreviewState('正在读取回答时使用的原始证据…'); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setBusy(true)
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
+    const version = `document_version_id=${evidence.documentVersionId}`
+    const artifact = evidence.artifactVersion === null ? '' : `&artifact_version=${evidence.artifactVersion}`
+    const endpoint = evidence.datasetId !== null
+      ? `${API}/v1/knowledge/evidence/by-dataset/${evidence.datasetId}?${version}${artifact}`
+      : evidence.chunkId !== null
+        ? `${API}/v1/knowledge/evidence/by-chunk/${evidence.chunkId}?${version}`
+        : null
+    if (endpoint === null) { setPreviewState('这条记录没有可定位的片段或数据集。'); setBusy(false); return }
+    const response = await fetch(endpoint, { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) { setPreviewState(await errorMessage(response, '原始证据读取失败')); setBusy(false); return }
+    const context = await response.json() as EvidenceContextPayload
+    setEvidenceContext(context)
+    if (evidence.datasetId !== null && evidence.sourceRows.length > 0) {
+      const rowsResponse = await fetch(`${API}/v1/knowledge/evidence/by-dataset/${evidence.datasetId}/rows?${version}${artifact}`, {
+        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ source_rows: evidence.sourceRows, columns: evidence.columns, limit: Math.min(200, Math.max(20, evidence.sourceRows.length)) }),
+      })
+      if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '贡献原始行读取失败')); setBusy(false); return }
+      setEvidenceRows(await rowsResponse.json() as EvidenceRowsPayload)
+    }
+    setPreviewState(''); setBusy(false)
+  }
   useEffect(() => {
     const open = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: number; title?: string; datasetId?: number }>).detail
@@ -1817,6 +1978,16 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     window.addEventListener('cangzhi-open-document', open)
     return () => window.removeEventListener('cangzhi-open-document', open)
   }, [documents, openKnowledge, previewUrl])
+  useEffect(() => {
+    const open = (event: Event) => {
+      const evidence = (event as CustomEvent<EvidenceLink>).detail
+      if (idNumber(evidence?.documentId) === null) return
+      openKnowledge()
+      void previewEvidence(evidence)
+    }
+    window.addEventListener('cangzhi-open-evidence', open)
+    return () => window.removeEventListener('cangzhi-open-evidence', open)
+  }, [openKnowledge, previewUrl])
   const useDocument = (item: WorkbenchDocument) => {
     setPinned(items => items.some(document => document.id === item.id) ? items : [...items, item])
     window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: `请重点读取并基于藏知资料《${item.title}》（document_id: ${item.id}）回答：\n\n` } }))
@@ -1860,7 +2031,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
     {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
-      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <pre className={css.markdownPreview}>{previewText}</pre> : previewTable ? <div className={css.tablePreview}><p>共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
+      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <pre className={css.markdownPreview}>{previewText}</pre> : previewTable ? <div className={css.tablePreview}><p>共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
       {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>当前对话知识</strong><small>模型使用“{workspace?.name ?? '当前空间'}”，你还可以固定重点资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未固定资料。到“资料”中搜索并预览，然后点击“加入对话”。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请综合当前对话中固定的藏知资料，归纳共同结论、分歧与依据，并逐条标注来源。\n\n' } }))}>综合固定资料</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
     </>}
     {notice && <p className={css.workbenchNotice}>{notice}</p>}
@@ -2010,10 +2181,11 @@ function CangzhiToolCard({ toolName, block, inspect, t }: CangzhiToolProps) {
   )
 }
 
-export const inject = ['slots', 'locale', 'settingsScope', 'sessions']
+export const inject = ['slots', 'locale', 'settingsScope', 'sessions', 'uiConversation']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'cangzhi: dictionaries')
+  ctx.uiConversation.events.register(cangzhiEvidenceDefinition)
   const consoleFace = createConsoleFace(ctx)
   const settingsFace: CangzhiSettingsFace = {
     settingsScope: ctx.settingsScope.bind<ConnectionSettings>({ namespace: NS }),
@@ -2067,9 +2239,9 @@ export function apply(ctx: ClientContext): void {
     inject: () => consoleFace,
   }, KnowledgeWorkbench))
 
-  ctx.slots.inject('conversation.chat.assistant-actions', () => ctx.slots.register({
-    name: 'conversation.chat.assistant-actions', id: 'cangzhi-evidence', order: 5,
-  }, AssistantEvidenceAction))
+  ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
+    name: 'conversation.chat.node', key: 'cangzhi-evidence',
+  }, CangzhiEvidenceNode))
 
   ctx.slots.inject('tool.call.toolview', function* () {
     for (const rawName of RAW_TOOLS) {

@@ -29,6 +29,7 @@ import {
   answerEvidence,
   collectStructuredEvidence,
   dedupeEvidenceLinks,
+  evidenceFromToolResult,
   fallbackAnswerEvidence,
   formatEvidenceLink,
   idNumber,
@@ -183,6 +184,54 @@ test('evidence — collectStructuredEvidence accepts camelCase keys as well', ()
   assert.equal(links[0].title, '订单')
 })
 
+test('evidence — search hits inherit the nested chunk locator', () => {
+  const links = collectStructuredEvidence({
+    hits: [{
+      document_id: 41,
+      document_version_id: 42,
+      title: '制度说明',
+      snippet: '原文片段',
+      chunk: { id: 43, heading_path: ['第一章'], page: 6 },
+    }],
+  })
+  assert.equal(links.length, 1)
+  assert.equal(links[0].documentId, 41)
+  assert.equal(links[0].documentVersionId, 42)
+  assert.equal(links[0].chunkId, 43)
+  assert.equal(links[0].page, 6)
+  assert.deepEqual(links[0].headingPath, ['第一章'])
+})
+
+test('evidence — tool result extraction keeps exact document and dataset versions', () => {
+  const content = [{
+    type: 'text',
+    text: JSON.stringify({
+      dataset_id: 354,
+      document_id: 387,
+      document_version_id: 392,
+      artifact_version: 7,
+      title: '指标数据更新明细',
+      source_rows: [18, 23, 23],
+      columns: ['数据期', '高中数量'],
+      rows: [{ row_number: 18, 数据期: 2024, 高中数量: 63 }],
+    }),
+  }]
+  const links = evidenceFromToolResult('mcp__cangzhi__knowledge_query_dataset', content)
+  assert.equal(links.length, 1)
+  assert.equal(links[0].documentId, 387)
+  assert.equal(links[0].documentVersionId, 392)
+  assert.equal(links[0].datasetId, 354)
+  assert.equal(links[0].artifactVersion, 7)
+  assert.deepEqual(links[0].sourceRows, [18, 23])
+  assert.deepEqual(links[0].columns, ['数据期', '高中数量'])
+})
+
+test('evidence — ignores non-Cangzhi tools and bare document metadata', () => {
+  const content = [{ type: 'text', text: JSON.stringify({ document_id: 9, document_version_id: 10, title: '普通资料' }) }]
+  assert.deepEqual(evidenceFromToolResult('mcp__other__read', content), [])
+  assert.deepEqual(evidenceFromToolResult('mcp__cangzhi__knowledge_get_document', content), [])
+})
+
 test('evidence — dedupeEvidenceLinks collapses by document + dataset', () => {
   const links = [
     { documentId: 1, datasetId: 2, title: 'a' },
@@ -262,7 +311,7 @@ test('evidence — answerEvidence returns null when no document id is present', 
 })
 
 test('evidence — formatEvidenceLink formats document and dataset ids', () => {
-  assert.equal(formatEvidenceLink({ documentId: 1, datasetId: 2, title: 'x' }), 'document_id 1 · dataset_id 2')
+  assert.equal(formatEvidenceLink({ documentId: 1, documentVersionId: 4, datasetId: 2, sourceRows: [8, 9], title: 'x' }), 'document_id 1 · version 4 · dataset 2 · rows 8, 9')
   assert.equal(formatEvidenceLink({ documentId: 1, datasetId: null, title: 'x' }), 'document_id 1')
   assert.equal(formatEvidenceLink(null), '')
 })
