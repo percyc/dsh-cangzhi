@@ -226,6 +226,11 @@
 - **修正**：补齐 `truncateEvidenceMarkdown` 的长度回退检查，避免在需要截断时使用旧字符串快照，确保保留证据开头内容且最终 UTF-8 字节数不超过预算。
 - **验证**：新增测试断言确认截断结果保留正文前缀；全量测试、构建、语法检查和 `git diff --check` 继续通过。
 
+## 2026-09-01：Markdown 证据预览 Profile 验证
+
+- **部署**：刷新 `web` Profile 的 `file:/data/share/dsh-cangzhi` 安装并重启明确的 DSH 进程组；当前地址为 `http://127.0.0.1:3080/`。
+- **运行验证**：页面 24,793 字节，插件 bundle 261,052 字节；确认加载 `@deepseek-ai/dsh-client-ui-primitives`、`MarkdownText`、`cangzhiMarkdown`、“格式化/原文”及 `byteLengthUtf8`，且 bundle 不含 `Buffer.byteLength`。`/_cangzhi-plugin/status` 返回 `apiConnected=true`、`mcpConfigured=true`、`toolCount=14`。
+
 ## 2026-09-01：工作台证据 Markdown 安全渲染（ADR-005）
 
 - **问题**：`EvidenceWorkbenchPreview` 把 `context.context_markdown` 用 `<pre>` 原文输出，标题、列表、强调、代码块、GFM 表格都不可读；用户希望像 DSH 对话正文一样格式化渲染，又不能引入额外的 markdown 库或 unsafe HTML。
