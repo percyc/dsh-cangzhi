@@ -844,7 +844,11 @@ function Overview({ documents, categories, total, mcp, workspace, system, worksp
   </>
 }
 
-function statusOf(item: DocumentItem): string { return item.pipeline?.overall_status ?? item.current_version?.processing_status ?? 'created' }
+function statusOf(item: DocumentItem): string {
+  const versionStatus = item.current_version?.processing_status
+  if (versionStatus === 'failed') return 'failed'
+  return item.pipeline?.overall_status ?? versionStatus ?? 'created'
+}
 const statusText: Record<string, string> = { completed: '已完成', ready: '已完成', processing: '处理中', created: '等待处理', retry: '等待重试', failed: '失败', unsupported: '未提取' }
 
 function DocumentRows({ documents, refresh, categories = [], compact = false }: { documents: DocumentItem[]; refresh(): Promise<unknown>; categories?: Category[]; compact?: boolean }) {
