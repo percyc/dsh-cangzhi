@@ -66,6 +66,7 @@ const zh = {
   popoverPolicyOn: '开启',
   popoverPolicyOffHint: '关闭后，从下一次模型步骤开始不再提供藏知工具。',
   popoverPolicyOnHint: '开启后，本对话可以按需调用藏知工具。',
+  popoverPolicyHostError: '未能在 DSH 中应用本对话的藏知策略，请稍后重试。',
   popoverWorkspace: '当前知识空间',
   popoverWorkspaceHint: '切换后模型工具立即使用新空间',
   popoverLoginFailed: '登录失败，请检查账号密码后重试',
@@ -160,6 +161,7 @@ const en = {
   popoverPolicyOn: 'On',
   popoverPolicyOffHint: 'After the next model step, Cangzhi tools will no longer be offered.',
   popoverPolicyOnHint: 'This conversation may call Cangzhi tools when useful.',
+  popoverPolicyHostError: 'Cangzhi could not apply this conversation policy in DSH. Try again.',
   popoverWorkspace: 'Active knowledge workspace',
   popoverWorkspaceHint: 'The new selection is used by the next MCP call immediately.',
   popoverLoginFailed: 'Login failed. Check your username and password and try again.',
@@ -331,7 +333,7 @@ interface KnowledgeSessionState {
   readonly sessionKey: string
   readonly policy: KnowledgePolicy
   readonly scope: 'conversation' | 'process'
-  setPolicy(next: KnowledgePolicy): void
+  setPolicy(next: KnowledgePolicy): Promise<{ applied: boolean }>
 }
 
 /**
@@ -370,16 +372,35 @@ function useKnowledgeSession(sessionId?: string): KnowledgeSessionState {
       window.removeEventListener('storage', storage)
     }
   }, [sessionId, sessionKey])
-  const setPolicy = (next: KnowledgePolicy): void => {
-    if (next === policy) return
-    setPolicyState(next)
-    savePolicy(sessionKey, next)
-    if (sessionId !== undefined) {
-      void fetch('/_cangzhi-plugin/session-policy', {
+  const setPolicy = async (next: KnowledgePolicy): Promise<{ applied: boolean }> => {
+    if (next === policy) return { applied: true }
+    if (sessionId === undefined) {
+      setPolicyState(next)
+      savePolicy(sessionKey, next)
+      return { applied: true }
+    }
+    try {
+      const response = await fetch('/_cangzhi-plugin/session-policy', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ sessionId, enabled: next === 'on' }),
-      }).catch(() => { /* the next model step will report a disconnected Host */ })
+      })
+      if (!response.ok) throw new Error(`host returned HTTP ${String(response.status)}`)
+      const body = await response.json().catch(() => null) as { applied?: boolean } | null
+      // Commit the local state and storage only after the host has accepted the
+      // change. Optimistic updates would risk a "false close": the toggle reads
+      // off, but the model can still call Cangzhi tools because the host never
+      // applied the restriction. The popover surfaces host failures through
+      // `cangzhi-policy-failed`, and the toggle stays on the previous value so
+      // the user can see the model-side state did not change.
+      setPolicyState(next)
+      savePolicy(sessionKey, next)
+      return { applied: body?.applied === true }
+    } catch (caught) {
+      window.dispatchEvent(new CustomEvent('cangzhi-policy-failed', {
+        detail: { sessionKey, sessionId, requested: next, error: caught instanceof Error ? caught.message : String(caught) },
+      }))
+      throw caught
     }
   }
   return { sessionKey, policy, scope: sessionId === undefined ? 'process' : 'conversation', setPolicy }
@@ -412,8 +433,8 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
   const [loginError, setLoginError] = useState('')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [policyError, setPolicyError] = useState('')
   const popoverRef = useRef<HTMLDivElement>(null)
-
   useEffect(() => {
     if (anchor === null) { setPosition(null); return }
     const update = () => {
@@ -459,13 +480,20 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
       onClose()
     }
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }
+    const onPolicyFailed = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionKey?: string; error?: string }>).detail
+      if (detail?.sessionKey !== undefined && detail.sessionKey !== session.sessionKey) return
+      setPolicyError(detail?.error ?? t('popoverPolicyHostError'))
+    }
     document.addEventListener('mousedown', onPointer)
     document.addEventListener('keydown', onKey)
+    window.addEventListener('cangzhi-policy-failed', onPolicyFailed)
     return () => {
       document.removeEventListener('mousedown', onPointer)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('cangzhi-policy-failed', onPolicyFailed)
     }
-  }, [anchor, onClose])
+  }, [anchor, onClose, session.sessionKey, t])
 
   if (anchor === null || position === null) return null
 
@@ -484,6 +512,14 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
     try { await onLogin(username, password) }
     catch (caught) { setLoginError(caught instanceof Error ? caught.message : t('popoverLoginFailed')) }
     finally { setLoginPending(false) }
+  }
+
+  const handlePolicyChange = (next: KnowledgePolicy) => {
+    if (next === session.policy) return
+    setPolicyError('')
+    void session.setPolicy(next).catch((caught: unknown) => {
+      setPolicyError(caught instanceof Error ? caught.message : t('popoverPolicyHostError'))
+    })
   }
 
   return (
@@ -522,11 +558,12 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
               role="radio"
               aria-checked={session.policy === option.value}
               data-active={String(session.policy === option.value)}
-              onClick={() => session.setPolicy(option.value)}
+              onClick={() => handlePolicyChange(option.value)}
             >{option.label}</button>
           ))}
         </div>
         <p className={css.popoverHint}>{policyHint}</p>
+        {policyError && <p className={css.popoverHint} role="alert" data-state="error">{policyError}</p>}
         <p className={css.popoverScopeNote}>{session.scope === 'conversation' ? t('popoverScopeNote') : t('popoverScopeGlobal')}</p>
       </section>
 

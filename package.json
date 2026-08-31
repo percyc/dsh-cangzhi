@@ -39,7 +39,8 @@
   },
   "scripts": {
     "build": "tsdown --config tsdown.config.ts && node scripts/rewrite-client-id.mjs",
-    "check": "node --check lib/index.js && node --check lib/client.js"
+    "check": "node --check lib/index.js && node --check lib/client.js",
+    "test": "node --test tests/*.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.1",

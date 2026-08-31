@@ -226,14 +226,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   type SessionPolicy = { disposePrompt: () => void; disposeRestriction: () => void }
   const sessionPolicies = new Map<string, SessionPolicy>()
   const desiredPolicies = new Map<string, boolean>()
-  const applySessionPolicy = (agent: { id: string; ctx: Context }, enabled: boolean): void => {
+  const applySessionPolicy = (agent: { id: string; ctx: Context; session: { header: { parentSession?: string } } }, enabled: boolean): void => {
     const previous = sessionPolicies.get(agent.id)
     previous?.disposePrompt()
     previous?.disposeRestriction()
-    if (enabled) {
-      sessionPolicies.delete(agent.id)
-      return
-    }
+    sessionPolicies.delete(agent.id)
+    if (enabled) return
     const disposePrompt = agent.ctx.systemPrompt.section({
       // A scoped empty section shadows the global guidance for this session.
       name: 'integration:cangzhi',
@@ -243,10 +241,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     const disposeRestriction = agent.ctx.tools.restrict({ deny: [...CANGZHI_TOOLS] })
     sessionPolicies.set(agent.id, { disposePrompt, disposeRestriction })
   }
+  const propagatePolicyToChildren = (parentId: string, enabled: boolean): void => {
+    const list = (ctx.agents as unknown as { list(): Array<{ id: string; session: { header: { parentSession?: string } } }> }).list()
+    for (const candidate of list) {
+      if (candidate.session.header.parentSession !== parentId) continue
+      desiredPolicies.set(candidate.id, enabled)
+      applySessionPolicy(candidate as { id: string; ctx: Context; session: { header: { parentSession?: string } } }, enabled)
+    }
+  }
   ctx.on('agent/created', ({ agent }) => {
     const parentId = agent.session.header.parentSession
-    const enabled = desiredPolicies.get(agent.id)
-      ?? (parentId !== undefined && desiredPolicies.get(parentId) === false ? false : true)
+    const inheritedFromParent = parentId !== undefined && desiredPolicies.get(parentId) === false
+    const enabled = desiredPolicies.get(agent.id) ?? (inheritedFromParent ? false : true)
     desiredPolicies.set(agent.id, enabled)
     applySessionPolicy(agent, enabled)
   })
@@ -255,6 +261,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     policy?.disposePrompt()
     policy?.disposeRestriction()
     sessionPolicies.delete(agent.id)
+    desiredPolicies.delete(agent.id)
   })
   ctx.effect(() => () => {
     for (const policy of sessionPolicies.values()) {
@@ -353,17 +360,33 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     handler: async (req, res) => {
       const rejection = ctx.connection.requestRejection(req)
       if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
-      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+      if (req.method === 'GET') {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const sessionId = (url.searchParams.get('sessionId') ?? '').trim()
+        if (sessionId.length === 0 || sessionId.length > 256) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify({ error: '会话标识无效' }))
+          return
+        }
+        const desired = desiredPolicies.get(sessionId) ?? true
+        const live = (ctx.agents.get as unknown as (id: string) => { id: string } | undefined)(sessionId)
+        const restricted = sessionPolicies.has(sessionId)
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ sessionId, desired, live: live !== undefined, restricted }))
+        return
+      }
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'GET, POST' }); res.end(); return }
       try {
         const body = await jsonBody(req)
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
         if (sessionId.length === 0 || sessionId.length > 256) throw new Error('会话标识无效')
         if (typeof body.enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
         desiredPolicies.set(sessionId, body.enabled)
-        const agent = (ctx.agents.get as unknown as (id: string) => { id: string; ctx: Context } | undefined)(sessionId)
+        const agent = (ctx.agents.get as unknown as (id: string) => { id: string; ctx: Context; session: { header: { parentSession?: string } } } | undefined)(sessionId)
         if (agent !== undefined) applySessionPolicy(agent, body.enabled)
-        res.writeHead(204, { 'cache-control': 'no-store' })
-        res.end()
+        propagatePolicyToChildren(sessionId, body.enabled)
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ applied: agent !== undefined, sessionId, enabled: body.enabled }))
       } catch (error) {
         res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
