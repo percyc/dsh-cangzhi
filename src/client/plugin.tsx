@@ -1425,7 +1425,7 @@ function Documents({ documents, categories, query, setQuery, status, setStatus, 
   return <section className={css.panel}><div className={css.libraryToolbar}><input value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索资料名称…"/><select value={categoryId} onChange={event => setCategoryId(event.target.value)}><option value="">全部分类</option>{categories.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select><select value={status} onChange={event => setStatus(event.target.value)}><option value="">全部状态</option><option value="completed">已完成</option><option value="processing">处理中</option><option value="created">等待处理</option><option value="retry">等待重试</option><option value="failed">失败</option></select>{hasFilters && <button onClick={() => { setQuery(''); setCategoryId(''); setStatus('') }}>清除</button>}<span>{visible.length} / {documents.length} 条</span></div><DocumentRows documents={visible} categories={categories} refresh={refresh} /></section>
 }
 
-type SearchHit = { document_id: number; title: string; source_type: string; score: number; snippet: string; categories?: Array<{ name: string }> }
+type SearchHit = { document_id: number; title: string; source_type: string; score: number; snippet: string; evidence_type?: string; categories?: Array<{ name: string }> }
 
 function KnowledgeSearch() {
   const [query, setQuery] = useState('')
@@ -1625,8 +1625,14 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
 }
 
 type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
-type WorkbenchDocument = { id: number; title: string; source_type: string; updated_at?: string; category?: string; snippet?: string }
+type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; updated_at?: string; category?: string; snippet?: string }
 type WorkbenchTab = 'browse' | 'preview' | 'context'
+
+function formatPreviewValue(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'object') return JSON.stringify(value)
+  return String(value)
+}
 
 function openDocumentInWorkbench(id: number, title: string): void {
   window.dispatchEvent(new CustomEvent('cangzhi-open-document', { detail: { id, title } }))
@@ -1643,6 +1649,8 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   const [tab, setTab] = useState<WorkbenchTab>('browse')
   const [pinned, setPinned] = useState<WorkbenchDocument[]>([])
   const [previewUrl, setPreviewUrl] = useState('')
+  const [previewText, setPreviewText] = useState('')
+  const [previewTable, setPreviewTable] = useState<{ columns: string[]; rows: Array<Record<string, unknown>>; total: number } | null>(null)
   const [previewState, setPreviewState] = useState('选择资料后可在这里预览原文')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
@@ -1660,7 +1668,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     const authValue = await authResponse.json() as AuthState
     setAuth(authValue)
     if (!authValue.authenticated) {
-      setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl('')
+      setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null)
       workspaceSlugRef.current = null
       return
     }
@@ -1674,9 +1682,9 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     workspaceSlugRef.current = nextWorkspace.slug
     setWorkspace(nextWorkspace)
     const items = await documentsResponse.json() as DocumentItem[]
-    setDocuments(items.map(item => ({ id: item.id, title: item.title, source_type: item.source_type, updated_at: item.updated_at, category: item.primary_category?.name })))
+    setDocuments(items.map(item => ({ id: item.id, title: item.title, source_type: item.source_type, content_kind: item.content_kind, updated_at: item.updated_at, category: item.primary_category?.name })))
     if (workspaceChanged) {
-      setQuery(''); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setTab('browse')
+      setQuery(''); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setTab('browse')
       setPreviewState('选择资料后可在这里预览原文')
     }
   }
@@ -1703,13 +1711,34 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     const response = await fetch(`${API}/search`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: query.trim(), limit: 40, offset: 0 }) })
     if (!response.ok) { setNotice(await errorMessage(response, '搜索失败')); setBusy(false); return }
     const body = await response.json() as { hits: SearchHit[] }
-    setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
+    setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, content_kind: hit.evidence_type === 'dataset' ? 'dataset' : undefined, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
     setTab('browse')
     setBusy(false)
   }
   const preview = async (item: WorkbenchDocument) => {
-    setSelected(item); setTab('preview'); setPreviewState('正在生成安全预览…'); setBusy(true)
+    setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
+    const isDataset = item.content_kind === 'dataset' || /\.(xlsx?|xls)$/iu.test(item.title)
+    if (isDataset) {
+      const datasetsResponse = await fetch(`${API}/datasets?document_id=${item.id}`, { credentials: 'include', cache: 'no-store' })
+      if (!datasetsResponse.ok) { setPreviewState(await errorMessage(datasetsResponse, '数据表尚未完成解析，暂时无法预览')); setBusy(false); return }
+      const datasets = await datasetsResponse.json() as Array<{ id: number; name: string; sheet_name: string }>
+      const dataset = datasets[0]
+      if (dataset === undefined) { setPreviewState('数据表尚未生成可预览的数据集'); setBusy(false); return }
+      const rowsResponse = await fetch(`${API}/datasets/${dataset.id}/rows?offset=0&limit=100`, { credentials: 'include', cache: 'no-store' })
+      if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return }
+      const rows = await rowsResponse.json() as { columns?: string[]; rows?: Array<Record<string, unknown>>; total?: number }
+      setPreviewTable({ columns: rows.columns ?? [], rows: rows.rows ?? [], total: rows.total ?? rows.rows?.length ?? 0 })
+      setPreviewState(''); setBusy(false); return
+    }
+    const detailResponse = await fetch(`${API}/documents/${item.id}`, { credentials: 'include', cache: 'no-store' })
+    if (detailResponse.ok) {
+      const detail = await detailResponse.json() as { current_version?: { raw_content?: string | null } }
+      const raw = detail.current_version?.raw_content
+      if (typeof raw === 'string' && raw.length > 0) {
+        setPreviewText(raw); setPreviewState(''); setBusy(false); return
+      }
+    }
     const response = await fetch(`${API}/documents/${item.id}/preview`, { credentials: 'include', cache: 'no-store' })
     if (!response.ok) { setPreviewState(await errorMessage(response, '这份资料暂时没有可用预览')); setBusy(false); return }
     const blob = await response.blob()
@@ -1770,7 +1799,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
     {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
-      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
+      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <pre className={css.markdownPreview}>{previewText}</pre> : previewTable ? <div className={css.tablePreview}><p>共 {previewTable.total} 行，显示前 {previewTable.rows.length} 行</p><div><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
       {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>当前对话知识</strong><small>模型使用“{workspace?.name ?? '当前空间'}”，你还可以固定重点资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未固定资料。到“资料”中搜索并预览，然后点击“加入对话”。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请综合当前对话中固定的藏知资料，归纳共同结论、分歧与依据，并逐条标注来源。\n\n' } }))}>综合固定资料</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
     </>}
     {notice && <p className={css.workbenchNotice}>{notice}</p>}
@@ -1835,13 +1864,31 @@ function resultPreview(value: Record<string, unknown> | null): string | null {
   return null
 }
 
+function idNumber(value: unknown): number | null {
+  const id = typeof value === 'number' ? value : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
 function nestedRecord(value: Record<string, unknown> | null): Record<string, unknown> | null {
-  if (value === null) return null
-  for (const key of ['structuredContent', 'result']) {
-    const candidate = value[key]
-    if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) return candidate as Record<string, unknown>
+  let current = value
+  for (let depth = 0; depth < 4; depth += 1) {
+    let next: Record<string, unknown> | null = null
+    for (const key of ['structuredContent', 'result']) {
+      const candidate = current[key]
+      if (typeof candidate === 'object' && candidate !== null && !Array.isArray(candidate)) {
+        next = candidate as Record<string, unknown>
+        break
+      }
+    }
+    if (next === null && Array.isArray(current.content)) {
+      const text = current.content.find(item => typeof item === 'object' && item !== null && (item as Record<string, unknown>).type === 'text') as Record<string, unknown> | undefined
+      const parsed = typeof text?.text === 'string' ? parseObject(text.text) : null
+      if (parsed !== null) next = parsed
+    }
+    if (next === null) return current
+    current = next
   }
-  return value
+  return current
 }
 
 function EvidencePreview({ tool, value }: { tool: string; value: Record<string, unknown> | null }) {
@@ -1850,11 +1897,11 @@ function EvidencePreview({ tool, value }: { tool: string; value: Record<string, 
   if (tool === 'knowledge_search' && Array.isArray(payload.hits)) {
     const hits = payload.hits.slice(0, 3).filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
     if (!hits.length) return <div className={css.evidenceEmpty}>当前知识空间没有找到相关证据</div>
-    return <div className={css.evidencePreview}><div className={css.evidenceHeading}><span>检索到 {String(payload.total ?? hits.length)} 条证据</span><small>{typeof payload.backend === 'string' ? payload.backend : 'knowledge'}</small></div>{hits.map((hit, index) => <article key={`${String(hit.document_id)}:${index}`}><span>{index + 1}</span><div><strong>{String(hit.title ?? '未命名资料')}</strong><p>{String(hit.snippet ?? hit.context ?? '').replace(/\s+/g, ' ').slice(0, 180)}</p></div>{typeof hit.document_id === 'number' && <button onClick={() => openDocumentInWorkbench(hit.document_id as number, String(hit.title ?? '未命名资料'))}>右侧预览</button>}</article>)}</div>
+    return <div className={css.evidencePreview}><div className={css.evidenceHeading}><span>检索到 {String(payload.total ?? hits.length)} 条证据</span><small>{typeof payload.backend === 'string' ? payload.backend : 'knowledge'}</small></div>{hits.map((hit, index) => { const documentId = idNumber(hit.document_id); return <article key={`${String(hit.document_id)}:${index}`}><span>{index + 1}</span><div><strong>{String(hit.title ?? '未命名资料')}</strong><p>{String(hit.snippet ?? hit.context ?? '').replace(/\s+/g, ' ').slice(0, 180)}</p></div>{documentId !== null && <button onClick={() => openDocumentInWorkbench(documentId, String(hit.title ?? '未命名资料'))}>右侧预览</button>}</article> })}</div>
   }
   if (tool === 'knowledge_ask' && typeof payload.answer === 'string') {
     const citations = Array.isArray(payload.citations) ? payload.citations.filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null).slice(0, 5) : []
-    return <div className={css.answerPreview}><p>{payload.answer.slice(0, 520)}</p>{citations.length > 0 && <div><span>引用 {citations.length}</span>{citations.map((citation, index) => <button key={`${String(citation.document_id ?? citation.chunk_id)}:${index}`} onClick={() => { if (typeof citation.document_id === 'number') openDocumentInWorkbench(citation.document_id, String(citation.title ?? citation.document_title ?? '知识证据')) }}><b>{index + 1}</b>{String(citation.title ?? citation.document_title ?? '知识证据')}</button>)}</div>}</div>
+    return <div className={css.answerPreview}><p>{payload.answer.slice(0, 520)}</p>{citations.length > 0 && <div><span>引用 {citations.length}</span>{citations.map((citation, index) => { const documentId = idNumber(citation.document_id); return <button key={`${String(citation.document_id ?? citation.chunk_id)}:${index}`} disabled={documentId === null} onClick={() => { if (documentId !== null) openDocumentInWorkbench(documentId, String(citation.title ?? citation.document_title ?? '知识证据')) }}><b>{index + 1}</b>{String(citation.title ?? citation.document_title ?? '知识证据')}{documentId !== null ? ' · 右侧预览' : ''}</button> })}</div>}</div>
   }
   const preview = resultPreview(payload)
   return preview === null ? null : <p className={css.toolPreview}>{preview}</p>
