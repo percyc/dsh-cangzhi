@@ -33,6 +33,7 @@ import {
   evidenceFromToolResult,
   formatEvidenceLink,
   idNumber,
+  suppressCatalogHints,
 } from './lib/evidence.mjs'
 import {
   buildMarkdownLabels,
@@ -1723,6 +1724,7 @@ type EvidenceLink = {
   readonly documentId: number
   readonly documentVersionId: number | null
   readonly chunkId: number | null
+  readonly chunkType: string | null
   readonly datasetId: number | null
   readonly artifactVersion: number | null
   readonly evidenceType: string
@@ -1796,6 +1798,8 @@ const cangzhiEvidenceDefinition: ConversationNodeDefinition<CangzhiEvidenceState
     const state = context.state
     const location = cangzhiEvidenceLocation(context)
     if (state === undefined || state.endSeq === undefined || state.evidence.length === 0 || location === undefined) return null
+    const evidence = suppressCatalogHints(state.evidence as EvidenceLink[]) as readonly EvidenceLink[]
+    if (evidence.length === 0) return null
     return {
       key: context.key,
       kind: 'cangzhi-evidence',
@@ -1804,7 +1808,7 @@ const cangzhiEvidenceDefinition: ConversationNodeDefinition<CangzhiEvidenceState
       anchorSeq: state.endSeq,
       location,
       visibility: 'visible',
-      data: { evidence: state.evidence },
+      data: { evidence },
     }
   },
 }

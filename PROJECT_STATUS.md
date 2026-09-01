@@ -10,9 +10,10 @@
 
 状态：个人 Beta / 多人协作开发中
 
-当前交付：结构化证据链已实现并完成本地构建，工作台证据 Markdown 已切换为 DSH
-`MarkdownText` 的安全格式化渲染（ADR-005），`web` Profile 已刷新为指向本仓库的
-`link:` 安装；当前 3080 DSH 已重启并加载新版 bundle，待真实对话点击验收。
+当前交付：结构化证据链已实现并完成本地构建；最终证据已按“发现线索 / 精确证据”
+分层（ADR-006），同一文档版本已有数据集贡献行时不再重复列出 `dataset_catalog`
+目录片段。工作台证据 Markdown 使用 DSH `MarkdownText` 安全渲染；待重启 DSH 后做
+真实对话点击验收。
 
 ## 最近完成
 
@@ -33,10 +34,12 @@
 - 证据点击后使用文档版本、片段、数据集产物版本和 `source_rows` 打开右侧精确预览；缺少版本身份的旧记录不会冒用最新版。
 - 工作台证据 Markdown 切换为 DSH `MarkdownText` 渲染，保留"原文"入口与安全 URL 策略，多列表格在工作台内横向滚动（ADR-005）。
 - 工作台证据 Markdown 切到不可格式化证据时不再显示空白：渲染时强制 `effectiveView = canFormat ? preferredView : 'raw'`，并把 64 KiB / UTF-8 边界判断从 `Buffer.byteLength` 迁移到 `TextEncoder`（带手写 fallback），浏览器 bundle 不再依赖 Node 全局。
+- 最终证据区区分搜索发现线索和精确数据集证据；同一文档版本已有 `source_rows` 时抑制被替代的 `dataset_catalog`，工具过程卡保持完整（ADR-006）。
 
 ## 当前协作任务
 
-下一项优先任务：把活动知识空间从进程级状态升级为 DSH `sessionId` / 用户级状态。
+- 已完成：回答证据分层与去重（负责人：Codex 集成；Ark 实现；MiniMax M3、agy 独立审查）。真实 session 载荷、61 项测试、DSH preset 构建和产物语法检查均通过；待 DSH 重启后做浏览器点击验收。
+- 后续优先任务：把活动知识空间从进程级状态升级为 DSH `sessionId` / 用户级状态。
 
 ## 重要限制
 

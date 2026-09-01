@@ -33,6 +33,8 @@ import {
   fallbackAnswerEvidence,
   formatEvidenceLink,
   idNumber,
+  isCatalogHint,
+  suppressCatalogHints,
 } from '../src/client/lib/evidence.mjs'
 
 function makeStorage(values) {
@@ -314,4 +316,351 @@ test('evidence — formatEvidenceLink formats document and dataset ids', () => {
   assert.equal(formatEvidenceLink({ documentId: 1, documentVersionId: 4, datasetId: 2, sourceRows: [8, 9], title: 'x' }), 'document_id 1 · version 4 · dataset 2 · rows 8, 9')
   assert.equal(formatEvidenceLink({ documentId: 1, datasetId: null, title: 'x' }), 'document_id 1')
   assert.equal(formatEvidenceLink(null), '')
+})
+
+test('evidence — isCatalogHint matches dataset_catalog chunkType, falls back to the legacy no-chunk shape, and rejects regular dataset rows', () => {
+  // Durable contract: chunkType === 'dataset_catalog' wins, even when an
+  // explicit chunk_id accompanies the catalog entry (real knowledge_search
+  // payload has chunk_id=59, chunk_type='dataset_catalog' together).
+  assert.equal(isCatalogHint({
+    documentId: 6, documentVersionId: 6, datasetId: 4, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [],
+  }), true)
+  // Top-level camelCase chunkType also works.
+  assert.equal(isCatalogHint({
+    documentId: 6, documentVersionId: 6, datasetId: 4, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [],
+  }), true)
+  // Legacy structural fallback: neither chunkId nor chunkType, no rows.
+  assert.equal(isCatalogHint({
+    documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [],
+  }), true)
+  // Has sourceRows: not a catalog hint.
+  assert.equal(isCatalogHint({
+    documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [18, 23],
+  }), false)
+  // Regular document chunk (no datasetId): not a catalog hint.
+  assert.equal(isCatalogHint({
+    documentId: 41, documentVersionId: 42, datasetId: null, chunkId: 43, chunkType: null, sourceRows: [],
+  }), false)
+  // No documentVersionId: not a catalog hint.
+  assert.equal(isCatalogHint({
+    documentId: 387, documentVersionId: null, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [],
+  }), false)
+  // Regular dataset chunk with a real chunkId (and rows omitted) must NOT
+  // be confused with a catalog hint. It has a chunkId so the legacy
+  // fallback does not match; it is not catalog_typed either.
+  assert.equal(isCatalogHint({
+    documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: 99, chunkType: null, sourceRows: [],
+  }), false)
+  assert.equal(isCatalogHint(null), false)
+})
+
+test('evidence — chunkType propagates from the top-level field or the nested chunk object', () => {
+  const topLevel = collectStructuredEvidence({
+    dataset_catalog: [{
+      document_id: 6, document_version_id: 6, dataset_id: 4, title: '样表',
+      chunk_id: 59, chunk_type: 'dataset_catalog',
+    }],
+  })
+  assert.equal(topLevel.length, 1)
+  assert.equal(topLevel[0].chunkId, 59)
+  assert.equal(topLevel[0].chunkType, 'dataset_catalog')
+
+  const nested = collectStructuredEvidence({
+    dataset_catalog: [{
+      document_id: 6, document_version_id: 6, dataset_id: 4, title: '样表',
+      chunk: { id: 59, type: 'dataset_catalog' },
+    }],
+  })
+  assert.equal(nested.length, 1)
+  assert.equal(nested[0].chunkId, 59)
+  assert.equal(nested[0].chunkType, 'dataset_catalog')
+
+  const camelCase = collectStructuredEvidence({
+    rows: [{ documentId: 6, documentVersionId: 6, datasetId: 4, chunkId: 59, chunkType: 'dataset_catalog', title: '样表' }],
+  })
+  assert.equal(camelCase.length, 1)
+  assert.equal(camelCase[0].chunkType, 'dataset_catalog')
+})
+
+test('evidence — real nested knowledge_search payload keeps the dataset_catalog chunkId while still being identified as a catalog hint', () => {
+  const links = evidenceFromToolResult('mcp__cangzhi__knowledge_search', [{
+    type: 'text',
+    text: JSON.stringify({
+      hits: [{ document_id: 6, document_version_id: 6, title: '样表资料', snippet: '命中片段' }],
+      dataset_catalog: [{
+        document_id: 6, document_version_id: 6, dataset_id: 4, title: '样表资料',
+        chunk: { id: 59, type: 'dataset_catalog' },
+        columns: ['数据期', '高中数量'],
+      }],
+    }),
+  }])
+  const catalog = links.find(link => link.datasetId === 4)
+  assert.ok(catalog !== undefined, 'catalog row must be picked up from the nested chunk object')
+  assert.equal(catalog.chunkId, 59)
+  assert.equal(catalog.chunkType, 'dataset_catalog')
+  assert.equal(isCatalogHint(catalog), true, 'real payload must satisfy isCatalogHint even with chunk_id=59')
+})
+
+test('evidence — suppressCatalogHints drops the search hint when the same document/version/dataset has exact source_rows', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: '指标数据更新明细' },
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [18, 23], title: '指标数据更新明细' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 1)
+  assert.deepEqual(out[0].sourceRows, [18, 23])
+  assert.equal(out[0].title, '指标数据更新明细')
+})
+
+test('evidence — suppressCatalogHints keeps catalog hints when no exact source_rows evidence exists', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: '指标数据更新明细' },
+    { documentId: 388, documentVersionId: 393, datasetId: 355, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: '另一份资料' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 2)
+  assert.equal(out[0].documentId, 387)
+  assert.equal(out[1].documentId, 388)
+})
+
+test('evidence — suppressCatalogHints never touches document chunks without a datasetId', () => {
+  const links = [
+    { documentId: 41, documentVersionId: 42, datasetId: null, chunkId: 43, chunkType: null, sourceRows: [], title: '制度说明' },
+    { documentId: 41, documentVersionId: 42, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [18], title: '同一份资料的数据集命中' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 2)
+  assert.equal(out[0].documentId, 41)
+  assert.equal(out[0].chunkId, 43)
+})
+
+test('evidence — suppressCatalogHints does not collapse across different documents', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: 'A 资料' },
+    { documentId: 388, documentVersionId: 393, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [5], title: 'B 资料' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 2)
+})
+
+test('evidence — suppressCatalogHints does not collapse across different versions', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [], title: '旧版本线索' },
+    { documentId: 387, documentVersionId: 999, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [1], title: '新版本精确证据' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 2)
+})
+
+test('evidence — suppressCatalogHints does not collapse across different datasets on the same document', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: 'A 表' },
+    { documentId: 387, documentVersionId: 392, datasetId: 500, chunkId: null, chunkType: null, sourceRows: [2], title: 'B 表' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 2)
+})
+
+test('evidence — suppressCatalogHints keeps catalog hints that lack a documentVersionId even when exact evidence shares the same document and dataset', () => {
+  const links = [
+    { documentId: 387, documentVersionId: null, datasetId: 354, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: '旧记录线索' },
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [4], title: '精确证据' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 2)
+  assert.equal(out[0].documentVersionId, null)
+  assert.deepEqual(out[1].sourceRows, [4])
+})
+
+test('evidence — suppressCatalogHints suppresses even when the catalog hint and the exact row have different titles (identity-based, not title-based)', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [], title: '检索结果' },
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [7], title: '精确贡献行' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 1)
+  assert.equal(out[0].title, '精确贡献行')
+})
+
+test('evidence — suppressCatalogHints preserves order and identity for entries that survive', () => {
+  const links = [
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [], title: 'A 线索' },
+    { documentId: 41, documentVersionId: 42, datasetId: null, chunkId: 43, chunkType: null, sourceRows: [], title: '制度' },
+    { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: null, chunkType: null, sourceRows: [9], title: 'A 精确' },
+    { documentId: 388, documentVersionId: 393, datasetId: 355, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [], title: 'B 线索' },
+  ]
+  const out = suppressCatalogHints(links)
+  assert.equal(out.length, 3)
+  assert.equal(out[0].title, '制度')
+  assert.equal(out[1].title, 'A 精确')
+  assert.equal(out[2].title, 'B 线索')
+})
+
+test('evidence — suppressCatalogHints tolerates non-array and nullish input', () => {
+  assert.deepEqual(suppressCatalogHints(null), [])
+  assert.deepEqual(suppressCatalogHints(undefined), [])
+  assert.deepEqual(suppressCatalogHints('not an array'), [])
+  assert.deepEqual(suppressCatalogHints([]), [])
+  assert.equal(suppressCatalogHints([{ documentId: 387, datasetId: 354, documentVersionId: 392, chunkId: null, chunkType: 'dataset_catalog', sourceRows: [] }]).length, 1)
+})
+
+test('evidence — end-to-end: real knowledge_search nested payload + real knowledge_query_dataset payload dedupe by identity in the final answer list', () => {
+  // Document 6 / version 6 / dataset 4 / nested chunk id 59, with
+  // chunk.type='dataset_catalog' — this is the M3-confirmed real shape.
+  const searchPayload = JSON.stringify({
+    hits: [
+      { document_id: 6, document_version_id: 6, title: '样表资料', snippet: '命中片段' },
+    ],
+    dataset_catalog: [
+      {
+        document_id: 6, document_version_id: 6, dataset_id: 4, title: '样表资料',
+        chunk: { id: 59, type: 'dataset_catalog' },
+        columns: ['数据期', '高中数量'],
+      },
+    ],
+  })
+  // Same triple, artifact_version=1, 12 source rows — this is the
+  // M3-confirmed real knowledge_query_dataset payload.
+  const queryPayload = JSON.stringify({
+    document_id: 6,
+    document_version_id: 6,
+    dataset_id: 4,
+    artifact_version: 1,
+    title: '样表资料',
+    source_rows: [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112],
+    columns: ['数据期', '高中数量'],
+  })
+  const searchLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_search', [{ type: 'text', text: searchPayload }])
+  const queryLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_query_dataset', [{ type: 'text', text: queryPayload }])
+  const combined = dedupeEvidenceLinks([...searchLinks, ...queryLinks])
+  assert.ok(combined.length >= 2, 'before suppression, both the catalog hint and the exact rows survive dedupe')
+  const final = suppressCatalogHints(combined)
+  const datasetEntries = final.filter(link => link.datasetId === 4)
+  assert.equal(datasetEntries.length, 1, 'real catalog hint must be suppressed when an exact triple exists')
+  assert.deepEqual(datasetEntries[0].sourceRows, [101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112])
+  assert.equal(datasetEntries[0].artifactVersion, 1)
+  const documentOnly = final.filter(link => link.datasetId === null)
+  for (const link of documentOnly) {
+    assert.equal(link.datasetId, null, 'document chunks without a datasetId must never be suppressed')
+  }
+})
+
+test('evidence — a regular dataset chunk without sourceRows is never treated as a catalog hint or as exact evidence', () => {
+  // A regular dataset chunk (e.g. dataset schema description surfaced by
+  // knowledge_search) has a real chunkId but no rows. The legacy fallback
+  // must not classify it as a catalog hint, and the suppress pass must
+  // leave it alone even when the same triple has no exact rows anywhere.
+  const regular = { documentId: 387, documentVersionId: 392, datasetId: 354, chunkId: 120, chunkType: null, sourceRows: [] }
+  assert.equal(isCatalogHint(regular), false, 'a regular dataset chunk with a real chunkId is not a catalog hint')
+  const out = suppressCatalogHints([regular])
+  assert.equal(out.length, 1, 'regular dataset chunks survive even with no exact rows on the triple')
+  assert.equal(out[0].chunkId, 120)
+})
+
+test('evidence — exact evidence with chunk_type=dataset_catalog is not allowed to suppress a same-triple hint (no self-shadowing)', () => {
+  const links = [
+    { documentId: 6, documentVersionId: 6, datasetId: 4, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [], title: 'catalog' },
+    { documentId: 6, documentVersionId: 6, datasetId: 4, chunkId: 59, chunkType: 'dataset_catalog', sourceRows: [12, 14], title: 'catalog+rows' },
+  ]
+  const out = suppressCatalogHints(links)
+  // Both rows carry chunkType='dataset_catalog', so neither counts as
+  // "exact" and both survive. The second entry is itself a catalog hint
+  // and is not promoted to exact by having rows.
+  assert.equal(out.length, 2)
+})
+
+test('evidence — different versions keep the catalog hint alive even when an exact row exists for a sibling version', () => {
+  const searchPayload = JSON.stringify({
+    dataset_catalog: [
+      { document_id: 6, document_version_id: 6, dataset_id: 4, title: '样表 v6',
+        chunk: { id: 59, type: 'dataset_catalog' } },
+    ],
+  })
+  const queryPayload = JSON.stringify({
+    document_id: 6, document_version_id: 7, dataset_id: 4, artifact_version: 2,
+    title: '样表 v7', source_rows: [201, 202], columns: ['数据期'],
+  })
+  const searchLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_search', [{ type: 'text', text: searchPayload }])
+  const queryLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_query_dataset', [{ type: 'text', text: queryPayload }])
+  const combined = dedupeEvidenceLinks([...searchLinks, ...queryLinks])
+  const final = suppressCatalogHints(combined)
+  // Different document versions mean identity does not match: the catalog
+  // hint for v6 must survive even though v7 has exact rows.
+  assert.equal(final.length, 2)
+  const byVersion = new Map(final.map(link => [link.documentVersionId, link]))
+  assert.equal(byVersion.get(6).chunkType, 'dataset_catalog')
+  assert.deepEqual(byVersion.get(7).sourceRows, [201, 202])
+})
+
+test('evidence — different documents keep the catalog hint alive even when an exact row exists for a sibling document', () => {
+  const searchPayload = JSON.stringify({
+    dataset_catalog: [
+      { document_id: 6, document_version_id: 6, dataset_id: 4, title: 'A 资料',
+        chunk: { id: 59, type: 'dataset_catalog' } },
+    ],
+  })
+  const queryPayload = JSON.stringify({
+    document_id: 7, document_version_id: 6, dataset_id: 4, artifact_version: 1,
+    title: 'B 资料', source_rows: [1, 2], columns: ['数据期'],
+  })
+  const searchLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_search', [{ type: 'text', text: searchPayload }])
+  const queryLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_query_dataset', [{ type: 'text', text: queryPayload }])
+  const combined = dedupeEvidenceLinks([...searchLinks, ...queryLinks])
+  const final = suppressCatalogHints(combined)
+  assert.equal(final.length, 2)
+  assert.equal(final.some(link => link.documentId === 6 && link.chunkType === 'dataset_catalog'), true)
+  assert.equal(final.some(link => link.documentId === 7 && link.sourceRows.length > 0), true)
+})
+
+test('evidence — top-level chunk_type without nested chunk propagates and is recognised as a catalog hint', () => {
+  const searchPayload = JSON.stringify({
+    dataset_catalog: [
+      { document_id: 6, document_version_id: 6, dataset_id: 4, title: '样表资料',
+        chunk_id: 59, chunk_type: 'dataset_catalog' },
+    ],
+  })
+  const searchLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_search', [{ type: 'text', text: searchPayload }])
+  const catalog = searchLinks.find(link => link.datasetId === 4)
+  assert.ok(catalog !== undefined)
+  assert.equal(catalog.chunkId, 59)
+  assert.equal(catalog.chunkType, 'dataset_catalog')
+  assert.equal(isCatalogHint(catalog), true)
+})
+
+test('evidence — real session payload suppresses a dataset_catalog hit that has no dataset_id', () => {
+  const searchLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_search', [{
+    type: 'text',
+    text: JSON.stringify({
+      hits: [{
+        document_id: 6,
+        document_version_id: 6,
+        title: '2026.1-6月周菜谱_Dify就绪版(1)',
+        chunk: {
+          id: 59,
+          type: 'dataset_catalog',
+          heading_path: ['menu', '数据区域 1'],
+        },
+        snippet: '检索发现的数据表目录片段',
+      }],
+    }),
+  }])
+  const queryLinks = evidenceFromToolResult('mcp__cangzhi__knowledge_query_dataset', [{
+    type: 'text',
+    text: JSON.stringify({
+      dataset_id: 4,
+      document_id: 6,
+      document_version_id: 6,
+      artifact_version: 1,
+      title: '2026.1-6月周菜谱_Dify就绪版(1)',
+      source_rows: [612, 576, 566, 571, 581, 586, 591, 556, 606, 596, 601, 561],
+    }),
+  }])
+
+  assert.equal(searchLinks[0].datasetId, null)
+  assert.equal(searchLinks[0].chunkId, 59)
+  assert.equal(searchLinks[0].chunkType, 'dataset_catalog')
+  const final = suppressCatalogHints(dedupeEvidenceLinks([...searchLinks, ...queryLinks]))
+  assert.equal(final.length, 1)
+  assert.equal(final[0].datasetId, 4)
+  assert.equal(final[0].sourceRows.length, 12)
 })

@@ -221,6 +221,29 @@
   - `MarkdownText` 自带 `var(--dsw-alias-*)` / `var(--ds-font-family-code)` token，工作台主题已使用同套 token；非常规主题变体（高对比 / 暗色之外的）适配本轮不做。
   - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次构建已落到 `lib/client.js`，用户下次重启 DSH 即可生效。
 
+## 2026-09-01：最终证据与发现线索分层（ADR-006）
+
+- **问题**：同一轮先由 `knowledge_search` 找到数据表目录，再由
+  `knowledge_query_dataset` 返回实际贡献行时，最终回答列出两条同标题证据；前者打开
+  `dataset_catalog` 片段，后者打开精确数据行，用户难以判断真正支持答案的来源。
+- **实现**：证据抽取新增 `chunkType`，兼容顶层与嵌套字段；最终
+  `cangzhi-evidence` 节点会在同一文档版本已有 `source_rows` 时抑制被替代的
+  `dataset_catalog`。目录线索带 dataset ID 时按文档 / 版本 / 数据集匹配，不带时按
+  文档版本匹配；工具过程卡、普通 chunk、不同文档和不同版本保持原样。
+- **真实载荷校正**：Ark 首版以“无 chunkId”识别目录线索；MiniMax M3 审查指出真实
+  线索带 `chunk_id=59`，推动改为传播 `chunk_type`。集成人随后直接核对 DSH session
+  原始事件，进一步确认该搜索命中没有 `dataset_id`，据此补上文档版本级替代规则和
+  真实记录回归。agy CLI 的执行环境带 SSH 标记，最初切换到文件型 token 存储而无法
+  读取桌面 keyring；移除 `SSH_CLIENT` / `SSH_CONNECTION` / `SSH_TTY` 后认证恢复。
+  最终使用 headless sandbox 完成独立只读验收，结论为 PASS，且确认分层只发生在最终
+  `buildViewNode`，工具过程证据保持原样。
+- **验证**：`node --test tests/*.test.mjs` 61 / 61 通过；真实文档 6 / 版本 6 /
+  chunk 59 与 dataset 4 / 12 行的回归只保留精确证据；复用
+  `/home/percy/software/deepseek-harness` preset 的 `tsdown` 构建通过；
+  `node scripts/rewrite-client-id.mjs`、`npm run check` 和 `git diff --check` 通过。
+- **待验收**：构建产物已更新，尚未重启当前 DSH 进程；浏览器端需用同一问题重新发起
+  一轮对话，确认最终只显示一条可打开 12 行原始数据的证据。
+
 ## 2026-09-01：截断预算收敛修正
 
 - **修正**：补齐 `truncateEvidenceMarkdown` 的长度回退检查，避免在需要截断时使用旧字符串快照，确保保留证据开头内容且最终 UTF-8 字节数不超过预算。

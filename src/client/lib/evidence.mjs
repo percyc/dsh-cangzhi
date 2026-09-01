@@ -32,6 +32,10 @@ function evidenceLinkFromObject(value) {
     : undefined
   const explicitChunkId = value.chunk_id ?? value.chunkId
   const chunkId = idNumber(explicitChunkId ?? nestedChunk?.id)
+  const explicitChunkType = value.chunk_type ?? value.chunkType
+  const chunkType = optionalString(explicitChunkType)
+    ?? optionalString(nestedChunk?.type)
+    ?? optionalString(nestedChunk?.chunk_type)
   const datasetId = idNumber(value.dataset_id ?? value.datasetId)
   // A bare document identity is useful for browsing, but is not evidence: it
   // cannot prove which version/fragment supported the answer.
@@ -49,6 +53,7 @@ function evidenceLinkFromObject(value) {
     documentId,
     documentVersionId,
     chunkId,
+    chunkType: chunkType ?? null,
     datasetId,
     artifactVersion: idNumber(value.artifact_version ?? value.artifactVersion),
     evidenceType: optionalString(value.evidence_type ?? value.evidenceType)
@@ -98,6 +103,74 @@ export function dedupeEvidenceLinks(links, limit) {
     seen.add(key)
     out.push(link)
     if (typeof limit === 'number' && out.length >= limit) break
+  }
+  return out
+}
+
+/**
+ * Decide whether a single link looks like a `dataset_catalog` discovery
+ * hint surfaced by `knowledge_search`: it identifies a document version
+ * and sometimes a dataset, but does not contribute concrete rows.
+ *
+ * A link is a catalog hint when any of the following hold:
+ * - `chunkType === 'dataset_catalog'` (the durable contract from the
+ *   search payload, which may carry an explicit `chunk_id` for the
+ *   catalog row entry).
+ * - Legacy structural fallback: `chunkId` and `chunkType` are both
+ *   missing AND `sourceRows` is empty. Document chunks (no `datasetId`)
+ *   and version-less triples never match.
+ */
+export function isCatalogHint(link) {
+  if (link === null || typeof link !== 'object') return false
+  if (link.documentVersionId === null || link.documentVersionId === undefined) return false
+  if (!Array.isArray(link.sourceRows) || link.sourceRows.length !== 0) return false
+  if (link.chunkType === 'dataset_catalog') return true
+  if (link.datasetId === null || link.datasetId === undefined) return false
+  if ((link.chunkId === null || link.chunkId === undefined)
+    && (link.chunkType === null || link.chunkType === undefined)) return true
+  return false
+}
+
+/**
+ * Collapse the final answer evidence list so that version-bound dataset
+ * evidence with concrete `source_rows` shadows bare catalog discovery
+ * hints. New payloads match the (document, version, dataset) triple; search
+ * payloads that omit datasetId fall back to the document-version identity.
+ *
+ * - Regular document chunks (no `datasetId`) are never touched.
+ * - Catalog hints without a `documentVersionId` are never touched.
+ * - Different documents, different versions or different datasets are
+ *   never collapsed — identity is structural, not title-based.
+ * - "Exact" evidence is the same triple with non-empty `sourceRows`
+ *   AND no `dataset_catalog` chunkType; this means a lone catalog hint
+ *   with empty `sourceRows` never suppresses itself, and a regular
+ *   dataset chunk without rows is left alone.
+ * - When no exact dataset evidence exists, catalog hints survive.
+ * - Order is preserved relative to the first non-suppressed entry.
+ */
+export function suppressCatalogHints(links) {
+  if (!Array.isArray(links)) return []
+  const exactKeys = new Set()
+  const exactDocumentVersions = new Set()
+  for (const link of links) {
+    if (link === null || typeof link !== 'object') continue
+    if (link.datasetId === null || link.datasetId === undefined) continue
+    if (link.documentVersionId === null || link.documentVersionId === undefined) continue
+    if (!Array.isArray(link.sourceRows) || link.sourceRows.length === 0) continue
+    if (link.chunkType === 'dataset_catalog') continue
+    exactKeys.add(`${link.documentId}:${link.documentVersionId}:${link.datasetId}`)
+    exactDocumentVersions.add(`${link.documentId}:${link.documentVersionId}`)
+  }
+  if (exactKeys.size === 0) return links.slice()
+  const out = []
+  for (const link of links) {
+    if (isCatalogHint(link)) {
+      const exactMatch = link.datasetId === null || link.datasetId === undefined
+        ? exactDocumentVersions.has(`${link.documentId}:${link.documentVersionId}`)
+        : exactKeys.has(`${link.documentId}:${link.documentVersionId}:${link.datasetId}`)
+      if (exactMatch) continue
+    }
+    out.push(link)
   }
   return out
 }
