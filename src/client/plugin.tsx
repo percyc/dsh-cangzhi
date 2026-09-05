@@ -41,6 +41,21 @@ import {
   shouldRenderFormattedMarkdown,
   truncateEvidenceMarkdown,
 } from './lib/markdown-preview.mjs'
+import {
+  REFRESH_CONSTANTS,
+  REFRESH_FAILURE_MAX_ATTEMPTS,
+  buildOverviewParams,
+  hasMoreOverviewPages,
+  mergeSystemStatus,
+  parseTotalCount,
+  resolveRefreshInterval,
+  shouldLightweightPoll,
+} from './lib/refresh-policy.mjs'
+import {
+  classifyDocumentPreview,
+  classifyEvidencePreview,
+  resolveEvidenceDatasetId,
+} from './lib/preview-routing.mjs'
 
 const NS = 'cangzhi'
 const API = '/_dsh-cangzhi-api'
@@ -1205,6 +1220,47 @@ async function loadWorkspaceFailure(workspace: Workspace): Promise<WorkspaceFail
   return failed > 0 ? { slug: workspace.slug, name: workspace.name, status: workspace.status, count: failed } : null
 }
 
+interface OverviewPage {
+  items: DocumentItem[]
+  total: number
+}
+
+/**
+ * Page through `documents/overview?include_processing=true` until the
+ * X-Total-Count boundary is reached. Used by both the initial console
+ * bootstrap and the lightweight adaptive polling loop so the full set
+ * of documents is always available, even when the workspace contains
+ * more than 200 entries. A single shared helper keeps the two callers
+ * honest about the same pagination contract.
+ */
+async function loadOverviewAll({ workspace, limit = REFRESH_CONSTANTS.OVERVIEW_DEFAULT_LIMIT, signal }: { workspace: string; limit?: number; signal?: AbortSignal }): Promise<OverviewPage> {
+  const collected: DocumentItem[] = []
+  let total = 0
+  let offset = 0
+  while (true) {
+    if (signal?.aborted === true) throw new DOMException('aborted', 'AbortError')
+    const params = buildOverviewParams({ workspace, limit, offset })
+    const response = await fetch(`${API}/documents/overview?${params}`, {
+      credentials: 'include',
+      cache: 'no-store',
+      ...(signal === undefined ? {} : { signal }),
+    })
+    if (!response.ok) throw new Error(`documents/overview ${String(response.status)}`)
+    const items = (await response.json()) as DocumentItem[]
+    if (items.length === 0) {
+      const reported = parseTotalCount(response.headers)
+      if (reported > 0) total = reported
+      break
+    }
+    collected.push(...items)
+    total = parseTotalCount(response.headers)
+    offset += items.length
+    if (!hasMoreOverviewPages({ offset, limit, total })) break
+    if (items.length < limit) break
+  }
+  return { items: collected, total: total === 0 ? collected.length : total }
+}
+
 function systemIssues(system: SystemStatus): SystemIssue[] {
   const issues: SystemIssue[] = []
   if (system.database.status !== 'ok') issues.push({ kind: 'database', status: system.database.status })
@@ -1283,21 +1339,21 @@ function NativeWorkspace() {
       const pluginResponse = await fetch('/_cangzhi-plugin/status', { cache: 'no-store' })
       if (pluginResponse.ok) setPlugin(await pluginResponse.json() as PluginStatus)
       if (authValue.authenticated) {
-        const [documentResponse, categoryResponse, workspacesResponse, currentWorkspaceResponse, systemResponse] = await Promise.all([
-          fetch(`${API}/documents/overview?limit=200&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
+        const [categoryResponse, workspacesResponse, currentWorkspaceResponse, systemResponse] = await Promise.all([
           fetch(`${API}/categories`, { credentials: 'include', cache: 'no-store' }),
           fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
           fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
           fetch(`${API}/system/status`, { credentials: 'include', cache: 'no-store' }),
         ])
-        if (!documentResponse.ok || !categoryResponse.ok || !workspacesResponse.ok || !currentWorkspaceResponse.ok) throw new Error('知识库读取失败')
-        setDocuments(await documentResponse.json() as DocumentItem[])
-        setTotal(Number(documentResponse.headers.get('x-total-count') ?? 0))
-        setCategories(await categoryResponse.json() as Category[])
-        const nextWorkspaces = await workspacesResponse.json() as Workspace[]
-        setWorkspaces(nextWorkspaces)
+        if (!categoryResponse.ok || !workspacesResponse.ok || !currentWorkspaceResponse.ok) throw new Error('知识库读取失败')
         const current = await currentWorkspaceResponse.json() as Workspace
         setCurrentWorkspace(current)
+        const nextWorkspaces = await workspacesResponse.json() as Workspace[]
+        setWorkspaces(nextWorkspaces)
+        setCategories(await categoryResponse.json() as Category[])
+        const overview = await loadOverviewAll({ workspace: current.slug })
+        setDocuments(overview.items)
+        setTotal(overview.total)
         if (systemResponse.ok) {
           const nextSystem = await systemResponse.json() as SystemStatus
           setSystemStatus(nextSystem)
@@ -1319,6 +1375,103 @@ function NativeWorkspace() {
     finally { setLoading(false) }
   }
   useEffect(() => { void refresh() }, [])
+
+  // Adaptive polling loop. While the page is mounted and the user is
+  // signed in, we keep the documents list and the system status counters
+  // fresh without going through the full bootstrap: there is no category
+  // reload, no workspace re-sync, no model side effect. Tasks started
+  // from any other surface in the console (create, upload, reprocess
+  // buttons) or by the background worker will surface here within one
+  // interval, so a freshly-queued job is never hidden behind a stale
+  // "处理队列: 0" badge.
+  useEffect(() => {
+    // A full bootstrap already reads the same two endpoints. Pausing here
+    // also aborts an existing lightweight request when a workspace switch
+    // starts, so the two refresh paths never race each other.
+    if (!shouldLightweightPoll({ authenticated: auth?.authenticated === true, busy: loading })) return
+    if (currentWorkspace === null) return
+    const workspaceSlug = currentWorkspace.slug
+    const controller = { current: null as AbortController | null }
+    const lifecycle = { alive: true, failureStreak: 0, timer: null as number | null }
+    // Track the most recent processing counters in a ref so the next
+    // tick of the loop reads the freshest snapshot rather than the
+    // value that was current when the previous request started.
+    const latestProcessing = { current: { active: 0, waiting: 0 } as { active: number; waiting: number } }
+    const clearTimer = () => {
+      if (lifecycle.timer !== null) {
+        window.clearTimeout(lifecycle.timer)
+        lifecycle.timer = null
+      }
+    }
+    const isVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden'
+
+    const lightweightRefresh = async (): Promise<void> => {
+      if (!lifecycle.alive) return
+      if (controller.current !== null) return // in-flight guard: never overlap requests
+      const abort = new AbortController()
+      controller.current = abort
+      try {
+        const [overviewPage, systemResponse] = await Promise.all([
+          loadOverviewAll({ workspace: workspaceSlug, signal: abort.signal }),
+          fetch(`${API}/system/status`, { credentials: 'include', cache: 'no-store', signal: abort.signal }),
+        ])
+        if (!lifecycle.alive || abort.signal.aborted) return
+        if (!systemResponse.ok) throw new Error(`system/status ${String(systemResponse.status)}`)
+        setDocuments(overviewPage.items)
+        setTotal(overviewPage.total)
+        const nextSystem = (await systemResponse.json()) as SystemStatus
+        if (!lifecycle.alive) return
+        setSystemStatus(prev => mergeSystemStatus(prev, nextSystem))
+        if (nextSystem.processing.failed_by_workspace !== undefined) {
+          const nextFailures = nextSystem.processing.failed_by_workspace.map(item => ({
+            slug: item.workspace_slug,
+            name: item.workspace_name,
+            status: item.workspace_status,
+            count: item.failed,
+          }))
+          if (!lifecycle.alive) return
+          setWorkspaceFailures(nextFailures)
+        }
+        latestProcessing.current = {
+          active: Number(nextSystem.processing.active) || 0,
+          waiting: Number(nextSystem.processing.waiting) || 0,
+        }
+        lifecycle.failureStreak = 0
+      } catch (caught) {
+        if (abort.signal.aborted || (caught instanceof DOMException && caught.name === 'AbortError')) return
+        lifecycle.failureStreak = Math.min(lifecycle.failureStreak + 1, REFRESH_FAILURE_MAX_ATTEMPTS)
+      } finally {
+        controller.current = null
+        if (!lifecycle.alive) return
+        const processing = latestProcessing.current
+        const interval = resolveRefreshInterval({
+          active: processing.active,
+          waiting: processing.waiting,
+          hidden: !isVisible(),
+          hasFailure: lifecycle.failureStreak > 0,
+          failureStreak: lifecycle.failureStreak,
+        })
+        lifecycle.timer = window.setTimeout(() => { void lightweightRefresh() }, interval)
+      }
+    }
+
+    void lightweightRefresh()
+    const onVisibility = () => {
+      if (!lifecycle.alive) return
+      if (isVisible() && controller.current === null) {
+        clearTimer()
+        void lightweightRefresh()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      lifecycle.alive = false
+      clearTimer()
+      controller.current?.abort()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [auth?.authenticated, currentWorkspace?.slug, loading])
+
   const logout = async () => { await fetch(`${API}/auth/logout`, { method: 'POST', credentials: 'include' }); setAuth({ authenticated: false, admin: null }) }
   const switchWorkspace = async (slug: string) => {
     const next = workspaces.find(item => item.slug === slug && item.status === 'active')
@@ -1653,11 +1806,12 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
 }
 
 type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
-type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
+type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; document_type?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
 type WorkbenchTab = 'browse' | 'preview' | 'context'
-type PreviewTable = { datasetId: number; columns: string[]; rows: Array<Record<string, unknown>>; total: number; offset: number; limit: number }
+type PreviewTable = { datasetId: number; columns: string[]; rows: Array<Record<string, unknown>>; total: number; offset: number; limit: number; evidenceVersionId?: number; evidenceMode?: 'catalog' }
 type EvidenceContextPayload = {
   evidence_type: string
+  document_type?: string
   document_id: number
   document_version_id: number
   title: string
@@ -1685,33 +1839,40 @@ function evidenceAssetUrl(value: string | null | undefined): string | null {
   return value
 }
 
+function WorkbenchMarkdownPreview({ markdown }: { markdown: string | null | undefined }) {
+  const normalizedMarkdown = useMemo(() => normalizeEvidenceMarkdown(markdown), [markdown])
+  const markdownLabels = useMemo(() => buildMarkdownLabels(), [])
+  // Apply the safety budget before deciding whether the body is renderable.
+  // The old order rejected large Markdown tables outright and sent them to
+  // <pre>, exposing GFM pipes/separators instead of rendering the table.
+  const formattedMarkdown = useMemo(() => truncateEvidenceMarkdown(normalizedMarkdown), [normalizedMarkdown])
+  const canFormat = shouldRenderFormattedMarkdown(formattedMarkdown)
+  const [preferredView, setPreferredView] = useState<'formatted' | 'raw'>('formatted')
+  const effectiveView: 'formatted' | 'raw' = canFormat ? preferredView : 'raw'
+  if (!normalizedMarkdown) return null
+  return <>
+    {canFormat && <div className={css.markdownFormatBar} role="tablist" aria-label="Markdown 渲染模式"><button type="button" role="tab" aria-selected={effectiveView === 'formatted'} className={css.markdownFormatButton} data-active={effectiveView === 'formatted'} onClick={() => setPreferredView('formatted')}>格式化</button><button type="button" role="tab" aria-selected={effectiveView === 'raw'} className={css.markdownFormatButton} data-active={effectiveView === 'raw'} onClick={() => setPreferredView('raw')}>原文</button></div>}
+    {effectiveView === 'formatted'
+      ? <div className={css.cangzhiMarkdown} data-cangzhi-markdown="workbench"><MarkdownText text={formattedMarkdown} labels={markdownLabels} /></div>
+      : <pre className={css.markdownPreview}>{normalizedMarkdown}</pre>}
+  </>
+}
+
 function EvidenceWorkbenchPreview({ context, rows }: { context: EvidenceContextPayload; rows: EvidenceRowsPayload | null }) {
   const columns = rows === null ? [] : ['row_number', ...(rows.columns ?? []).filter(column => column !== 'row_number')]
   const preview = evidenceAssetUrl(context.preview_url)
   const original = evidenceAssetUrl(context.original_url)
   const normalizedMarkdown = useMemo(() => normalizeEvidenceMarkdown(context.context_markdown), [context.context_markdown])
-  const markdownLabels = useMemo(() => buildMarkdownLabels(), [])
-  const canFormat = shouldRenderFormattedMarkdown(normalizedMarkdown)
-  // Track the user's last *express* preference. The effective view drops back
-  // to 'raw' whenever the evidence cannot be formatted (empty / oversized /
-  // whitespace-only), so we never leave the user staring at a blank panel
-  // after switching evidence.
-  const [preferredView, setPreferredView] = useState<'formatted' | 'raw'>('formatted')
-  const effectiveView: 'formatted' | 'raw' = canFormat ? preferredView : 'raw'
-  const showFormatBar = Boolean(normalizedMarkdown) && canFormat
-  const truncatedMarkdown = useMemo(
-    () => effectiveView === 'formatted' ? truncateEvidenceMarkdown(normalizedMarkdown) : normalizedMarkdown,
-    [normalizedMarkdown, effectiveView],
-  )
+  const previewKind = classifyEvidencePreview(context, rows)
+  const paragraph = context.snippet?.trim() || normalizedMarkdown
   return <div className={css.exactEvidencePreview}>
     <div className={css.exactEvidenceMeta}><span>版本绑定证据</span><small>document_version_id {context.document_version_id}{context.page ? ` · 第 ${context.page} 页` : ''}</small></div>
     {context.heading_path && context.heading_path.length > 0 && <p className={css.exactEvidencePath}>{context.heading_path.join(' / ')}</p>}
-    {showFormatBar && <div className={css.markdownFormatBar} role="tablist" aria-label="证据 Markdown 渲染模式"><button type="button" role="tab" aria-selected={effectiveView === 'formatted'} className={css.markdownFormatButton} data-active={effectiveView === 'formatted'} onClick={() => setPreferredView('formatted')}>格式化</button><button type="button" role="tab" aria-selected={effectiveView === 'raw'} className={css.markdownFormatButton} data-active={effectiveView === 'raw'} onClick={() => setPreferredView('raw')}>原文</button></div>}
-    {normalizedMarkdown && effectiveView === 'formatted' && <div className={css.cangzhiMarkdown} data-cangzhi-markdown="evidence"><MarkdownText text={truncatedMarkdown} labels={markdownLabels} /></div>}
-    {normalizedMarkdown && effectiveView === 'raw' && <pre className={css.markdownPreview}>{normalizedMarkdown}</pre>}
-    {!normalizedMarkdown && context.snippet && <blockquote>{context.snippet}</blockquote>}
-    {rows && <div className={css.tablePreview}><p>本次回答实际引用 {rows.returned ?? rows.rows?.length ?? 0} / {rows.requested ?? rows.rows?.length ?? 0} 行{rows.truncated ? '（受控截取）' : ''}</p><div className={css.tableScroll}><table><thead><tr>{columns.map(column => <th key={column}>{column === 'row_number' ? '原始行号' : column}</th>)}</tr></thead><tbody>{(rows.rows ?? []).map((row, index) => <tr key={String(row.row_number ?? index)}>{columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div></div>}
-    {!normalizedMarkdown && !context.snippet && !rows && <div className={css.previewPlaceholder}><span>▤</span><p>证据元数据已核验，但没有可显示的正文片段。</p></div>}
+    {previewKind === 'markdown' && <WorkbenchMarkdownPreview markdown={normalizedMarkdown}/>}
+    {previewKind === 'document' && paragraph && <blockquote>{paragraph}</blockquote>}
+    {previewKind === 'dataset' && rows && <div className={css.tablePreview}><p>本次回答实际引用 {rows.returned ?? rows.rows?.length ?? 0} / {rows.requested ?? rows.rows?.length ?? 0} 行{rows.truncated ? '（受控截取）' : ''}</p><div className={css.tableScroll}><table><thead><tr>{columns.map(column => <th key={column}>{column === 'row_number' ? '原始行号' : column}</th>)}</tr></thead><tbody>{(rows.rows ?? []).map((row, index) => <tr key={String(row.row_number ?? index)}>{columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div></div>}
+    {previewKind === 'dataset' && !rows && <div className={css.datasetEvidenceSummary}><strong>{context.dataset?.name === undefined ? '结构化数据表' : String(context.dataset.name)}</strong><p>{context.snippet || '这条证据已定位到数据集，但本轮工具结果没有携带贡献行。'}</p>{Array.isArray(context.table_location?.column_names) && <small>字段：{context.table_location.column_names.map(String).join('、')}</small>}</div>}
+    {previewKind === 'empty' && <div className={css.previewPlaceholder}><span>▤</span><p>证据元数据已核验，但没有可显示的正文片段。</p></div>}
     {(preview || original) && <div className={css.evidenceAssetActions}>{preview && <button type="button" onClick={() => window.open(preview, '_blank', 'noopener,noreferrer')}>打开版本预览</button>}{original && <button type="button" onClick={() => window.open(original, '_blank', 'noopener,noreferrer')}>打开原文件</button>}</div>}
   </div>
 }
@@ -1917,22 +2078,23 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     setTab('browse')
     setBusy(false)
   }
-  const loadDatasetRows = async (datasetId: number, offset: number, limit: number) => {
+  const loadDatasetRows = async (datasetId: number, offset: number, limit: number, evidence?: { versionId: number; mode: 'catalog' }): Promise<boolean> => {
     const requestId = ++tableRequestRef.current
     setBusy(true)
     const rowsResponse = await fetch(`${API}/datasets/${datasetId}/rows?offset=${offset}&limit=${limit}`, { credentials: 'include', cache: 'no-store' })
-    if (requestId !== tableRequestRef.current) return
-    if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return }
+    if (requestId !== tableRequestRef.current) return false
+    if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return false }
     const rows = await rowsResponse.json() as { columns?: string[]; rows?: Array<Record<string, unknown>>; total?: number }
-    setPreviewTable({ datasetId, columns: rows.columns ?? [], rows: rows.rows ?? [], total: rows.total ?? rows.rows?.length ?? 0, offset, limit })
+    setPreviewTable({ datasetId, columns: rows.columns ?? [], rows: rows.rows ?? [], total: rows.total ?? rows.rows?.length ?? 0, offset, limit, ...(evidence === undefined ? {} : { evidenceVersionId: evidence.versionId, evidenceMode: evidence.mode }) })
     setPreviewState(''); setBusy(false)
+    return true
   }
   const preview = async (item: WorkbenchDocument) => {
     tableRequestRef.current += 1
     setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
-    const isDataset = item.content_kind === 'dataset' || item.dataset_id !== undefined || /\.(xlsx?|xls)$/iu.test(item.title)
-    if (isDataset) {
+    const initialKind = classifyDocumentPreview({ contentKind: item.content_kind, sourceType: item.source_type, documentType: item.document_type, title: item.title })
+    if (initialKind === 'dataset' || item.dataset_id !== undefined) {
       const datasetsResponse = await fetch(`${API}/datasets?document_id=${item.id}`, { credentials: 'include', cache: 'no-store' })
       if (!datasetsResponse.ok) { setPreviewState(await errorMessage(datasetsResponse, '数据表尚未完成解析，暂时无法预览')); setBusy(false); return }
       const datasets = await datasetsResponse.json() as Array<{ id: number; name: string; sheet_name: string }>
@@ -1943,9 +2105,13 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     }
     const detailResponse = await fetch(`${API}/documents/${item.id}`, { credentials: 'include', cache: 'no-store' })
     if (detailResponse.ok) {
-      const detail = await detailResponse.json() as { current_version?: { raw_content?: string | null } }
+      const detail = await detailResponse.json() as { current_version?: { raw_content?: string | null; structured_content?: { document_type?: string } | null } }
       const raw = detail.current_version?.raw_content
-      if (typeof raw === 'string' && raw.length > 0) {
+      const documentType = detail.current_version?.structured_content?.document_type
+      const resolved = { ...item, ...(typeof documentType === 'string' ? { document_type: documentType } : {}) }
+      const kind = classifyDocumentPreview({ contentKind: resolved.content_kind, sourceType: resolved.source_type, documentType: resolved.document_type, title: resolved.title })
+      setSelected(resolved)
+      if ((kind === 'markdown' || kind === 'text') && typeof raw === 'string' && raw.length > 0) {
         setPreviewText(raw); setPreviewState(''); setBusy(false); return
       }
     }
@@ -1956,7 +2122,10 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   }
   const changeTablePage = (offset: number, limit = previewTable?.limit ?? PREVIEW_PAGE_SIZE) => {
     if (previewTable === null || offset < 0 || offset >= previewTable.total || busy) return
-    void loadDatasetRows(previewTable.datasetId, offset, limit)
+    const evidence = previewTable.evidenceVersionId === undefined || previewTable.evidenceMode === undefined
+      ? undefined
+      : { versionId: previewTable.evidenceVersionId, mode: previewTable.evidenceMode }
+    void loadDatasetRows(previewTable.datasetId, offset, limit, evidence)
   }
   const previewEvidence = async (evidence: EvidenceLink) => {
     if (evidence.documentVersionId === null) {
@@ -1986,6 +2155,17 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
       })
       if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '贡献原始行读取失败')); setBusy(false); return }
       setEvidenceRows(await rowsResponse.json() as EvidenceRowsPayload)
+    } else if (classifyEvidencePreview(context, null) === 'dataset') {
+      const datasetId = resolveEvidenceDatasetId(context, evidence.datasetId)
+      if (datasetId === null) {
+        setPreviewState('数据集身份缺失或与证据不一致，不能用其他数据表代替。')
+        setBusy(false)
+        return
+      }
+      setSelected({ id: evidence.documentId, title: evidence.title, source_type: 'file', content_kind: 'dataset', dataset_id: datasetId, document_type: context.document_type })
+      const loaded = await loadDatasetRows(datasetId, 0, PREVIEW_PAGE_SIZE, { versionId: evidence.documentVersionId, mode: 'catalog' })
+      if (loaded) setEvidenceContext(null)
+      return
     }
     setPreviewState(''); setBusy(false)
   }
@@ -2058,7 +2238,7 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
     {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
-      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <pre className={css.markdownPreview}>{previewText}</pre> : previewTable ? <div className={css.tablePreview}><p>共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
+      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <div className={css.exactEvidencePreview}>{classifyDocumentPreview({ contentKind: selected?.content_kind, sourceType: selected?.source_type, documentType: selected?.document_type, title: selected?.title }) === 'markdown' ? <WorkbenchMarkdownPreview markdown={previewText}/> : <pre className={css.markdownPreview}>{previewText}</pre>}</div> : previewTable ? <div className={css.tablePreview}><p>{previewTable.evidenceMode === 'catalog' && previewTable.evidenceVersionId !== undefined ? `版本绑定目录数据集 · version ${previewTable.evidenceVersionId} · ` : ''}共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
       {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>当前对话知识</strong><small>模型使用“{workspace?.name ?? '当前空间'}”，你还可以固定重点资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未固定资料。到“资料”中搜索并预览，然后点击“加入对话”。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请综合当前对话中固定的藏知资料，归纳共同结论、分歧与依据，并逐条标注来源。\n\n' } }))}>综合固定资料</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
     </>}
     {notice && <p className={css.workbenchNotice}>{notice}</p>}

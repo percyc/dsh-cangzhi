@@ -1,7 +1,7 @@
 # ADR-005：在工作台中安全渲染证据 Markdown
 
 日期：2026-09-01  
-状态：已采纳（2026-09-01 修订：byte 计数改用 `TextEncoder`、视图状态回落）
+状态：已采纳（2026-09-01 修订：byte 计数、超长内容先截断后格式化、统一预览入口）
 
 ## 背景
 
@@ -31,15 +31,19 @@ Markdown，数据表是已经成型的 `<table>`。两条路径是独立的、�
 
 2. **保留“原文 / 格式化”切换**。默认进入格式化视图（命中 `shouldRenderFormattedMarkdown`
    时），但工作台永远提供“原文”入口以满足排错、贴回原值、人工核对等需要；
-   大于 64 KiB 或纯空白的 Markdown 字符串直接退到原文 `<pre>`，避免对超长
-   负载或空 body 走渲染管线。
+   大于 64 KiB 的 Markdown 必须先由 `truncateEvidenceMarkdown` 安全截断，再判断
+   是否可格式化，不能直接退到 `<pre>`。否则大型 GFM 表格会重新暴露 `| --- |`
+   等 Markdown 符号。纯空白内容仍不进入渲染管线。
    - 切换按钮只在 `canFormat === true` 时显示，避免在不可格式化证据上误
      导用户。
    - 用户在多个证据间切换时，**最后一次显式选择**会被记住（`preferredView`）
      ，但当某条新证据 `canFormat === false` 时渲染层会强制回落 `raw`，
      而不是停留在“已选中格式化”但实际不可用的状态——确保任意证据都不会
      让用户看到空白面板。
-   - 64 KiB / UTF-8 边界由 `byteLengthUtf8` 保证，详见决策 4。
+   - 64 KiB / UTF-8 边界由 `byteLengthUtf8` 保证，详见决策 4；截断边界使用二分
+     查找，避免大型表格在主线程执行逐字符重复编码。
+   - 普通资料正文与版本绑定证据复用 `WorkbenchMarkdownPreview`，避免从不同入口
+     打开同一份 Markdown 时分别显示格式化表格和原始管道符。
 
 3. **表格在工作台内横向滚动**。MarkdownText 内部的 `.tableScroll` 已经带
    `overflow-x: auto` 并按 ≥4 列自动套 `.md-table-wide` 钩子；工作台外层
@@ -84,7 +88,7 @@ Markdown，数据表是已经成型的 `<table>`。两条路径是独立的、�
 
 ## 兼容与边界
 
-- 旧 `<pre>` 仍然存在，作为“原文”模式或 fallback 的可见入口；点击行为、
+- 旧 `<pre>` 仍然存在，作为用户主动选择的“原文”模式或空内容 fallback；点击行为、
   选中复制等不被破坏。
 - 旧的“证据精确上下文 + 数据表 rows”双视图继续生效：数据表行渲染走
   `previewTable` / `rows` 路径，本轮没碰。
@@ -109,3 +113,5 @@ Markdown，数据表是已经成型的 `<table>`。两条路径是独立的、�
   `git diff --check` 无冲突标记。
 - 数据表预览（pagination / 行 / 列 / 滚动）行为不变；`cangzhi-evidence`
   Conversation Node 折叠逻辑不变。
+- 超过 64 KiB 的 GFM 表格先截断到安全预算再格式化，表头和可容纳的行直接渲染为
+  `<table>`；纯函数回归应在毫秒级完成，不能阻塞浏览器主线程。

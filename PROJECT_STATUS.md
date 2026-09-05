@@ -12,8 +12,8 @@
 
 当前交付：结构化证据链已实现并完成本地构建；最终证据已按“发现线索 / 精确证据”
 分层（ADR-006），同一文档版本已有数据集贡献行时不再重复列出 `dataset_catalog`
-目录片段。工作台证据 Markdown 使用 DSH `MarkdownText` 安全渲染；待重启 DSH 后做
-真实对话点击验收。
+目录片段。工作台预览已按服务端证据类型路由到数据表、Markdown、
+PDF / Word 或纯文本渲染器（ADR-008）；待浏览器补验。
 
 ## 最近完成
 
@@ -35,9 +35,12 @@
 - 工作台证据 Markdown 切换为 DSH `MarkdownText` 渲染，保留"原文"入口与安全 URL 策略，多列表格在工作台内横向滚动（ADR-005）。
 - 工作台证据 Markdown 切到不可格式化证据时不再显示空白：渲染时强制 `effectiveView = canFormat ? preferredView : 'raw'`，并把 64 KiB / UTF-8 边界判断从 `Buffer.byteLength` 迁移到 `TextEncoder`（带手写 fallback），浏览器 bundle 不再依赖 Node 全局。
 - 最终证据区区分搜索发现线索和精确数据集证据；同一文档版本已有 `source_rows` 时抑制被替代的 `dataset_catalog`，工具过程卡保持完整（ADR-006）。
+- 预览渲染改为类型路由：服务端 `evidence_type` / `document_type` / 数据集元数据优先，扩展名与内容识别只兼容旧数据；数据表、Markdown、PDF / Word 和纯文本分别使用对应渲染器（ADR-008）。
 
 ## 当前协作任务
 
+- 已完成：预览渲染器分类（ADR-008）。不再只看 Markdown 字符，而是先使用后端证据与文档类型元数据，再将数据表、Markdown / 笔记、PDF / Word 和纯文本交给各自的渲染器。`dataset_catalog` 不再显示“代表行”长摘要，而是核验版本后打开真实分页表格；有 `source_rows` 时仍只显示精确贡献行。80 项测试和 DSH preset 构建通过，3080 已重启并确认下发新 bundle。
+- 已完成：处理队列实时状态（负责人：Codex 集成；Ark 实现；MiniMax M3、agy 复核，ADR-007）。管理中心可自动发现外部任务，处理中约 3 秒、空闲 15 秒、隐藏 60 秒刷新；顶部当前空间计数使用完整 `pipeline.overall_status`，服务器状态使用后端文档级任务统计；全量刷新期间暂停轻量轮询，构建与测试通过。待重启 DSH 与藏知 API 后做真实任务 `0 → 处理中 → 0` 浏览器验收。
 - 已完成：回答证据分层与去重（负责人：Codex 集成；Ark 实现；MiniMax M3、agy 独立审查）。真实 session 载荷、61 项测试、DSH preset 构建和产物语法检查均通过；待 DSH 重启后做浏览器点击验收。
 - 后续优先任务：把活动知识空间从进程级状态升级为 DSH `sessionId` / 用户级状态。
 

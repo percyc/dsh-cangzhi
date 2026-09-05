@@ -146,18 +146,27 @@ export function truncateEvidenceMarkdown(text, options = {}) {
   const marker = `…(已截取，超过 ${limit} 字节)`
   const markerBlock = `\n\n${marker}\n`
   const bodyBudget = Math.max(0, limit - byteLengthUtf8(markerBlock))
-  // Slice on the codepoint boundary, then walk back to a valid cut.
-  let end = text.length
-  while (end > 0 && byteLengthUtf8(text.slice(0, end)) > bodyBudget) end -= 1
+  // Find the largest fitting UTF-16 slice in O(log n). The previous
+  // character-by-character loop repeatedly encoded the whole prefix and
+  // could freeze the UI for large tables before MarkdownText even rendered.
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (byteLengthUtf8(text.slice(0, middle)) <= bodyBudget) low = middle
+    else high = middle - 1
+  }
+  let end = low
+  // Do not split a UTF-16 surrogate pair at the chosen boundary.
+  if (end > 0 && end < text.length) {
+    const leading = text.charCodeAt(end - 1)
+    const trailing = text.charCodeAt(end)
+    if (leading >= 0xd800 && leading <= 0xdbff && trailing >= 0xdc00 && trailing <= 0xdfff) end -= 1
+  }
   // Prefer cutting on a newline so the trailing marker sits on its own line.
   const newline = text.lastIndexOf('\n', end)
-  if (newline > bodyBudget * 0.5) end = newline
-  let body = text.slice(0, end).trimEnd()
-  // If the newline preference still overshoots (because trimEnd dropped a
-  // few bytes), tighten the cut until the assembled output fits.
-  while (body.length > 0 && byteLengthUtf8(`${body}${markerBlock}`) > limit) {
-    body = body.slice(0, body.length - 1).trimEnd()
-  }
+  if (newline > end * 0.5) end = newline
+  const body = text.slice(0, end).trimEnd()
   return `${body}${markerBlock}`
 }
 

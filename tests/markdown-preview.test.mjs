@@ -53,6 +53,16 @@ test('markdown preview — shouldRenderFormattedMarkdown rejects oversized paylo
   assert.equal(shouldRenderFormattedMarkdown(atCustom, { byteLimit: 16 }), true)
 })
 
+test('markdown preview — oversized GFM tables are truncated before format eligibility', () => {
+  const header = '| 日期 | 菜品 |\n| --- | --- |\n'
+  const oversized = header + '| 2026-01-19 | 菜品 |\n'.repeat(4_000)
+  assert.equal(shouldRenderFormattedMarkdown(oversized), false)
+  const safeMarkdown = truncateEvidenceMarkdown(oversized)
+  assert.ok(Buffer.byteLength(safeMarkdown, 'utf8') <= EVIDENCE_MARKDOWN_BYTE_LIMIT)
+  assert.equal(shouldRenderFormattedMarkdown(safeMarkdown), true)
+  assert.ok(safeMarkdown.startsWith(header), 'table header must survive the safety truncation')
+})
+
 test('markdown preview — truncateEvidenceMarkdown short-circuits when input fits', () => {
   assert.equal(truncateEvidenceMarkdown('# 标题'), '# 标题')
   assert.equal(truncateEvidenceMarkdown('hello'), 'hello')

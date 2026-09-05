@@ -221,6 +221,65 @@
   - `MarkdownText` 自带 `var(--dsw-alias-*)` / `var(--ds-font-family-code)` token，工作台主题已使用同套 token；非常规主题变体（高对比 / 暗色之外的）适配本轮不做。
   - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次构建已落到 `lib/client.js`，用户下次重启 DSH 即可生效。
 
+## 2026-09-01：处理队列自适应刷新（ADR-007）
+
+- **问题**：管理中心只在打开时读取一次状态，后台任务运行期间会一直显示旧的“0”；
+  单页 200 条概览也会漏掉大型空间后续资料。
+- **实现**：初次刷新和轻量刷新复用 `X-Total-Count` 全量分页；管理中心使用单飞、
+  可取消的递归定时器，仅刷新资料概览与服务器状态，处理时 3 秒、空闲 15 秒、隐藏
+  60 秒，失败指数退避。全量刷新期间暂停并中止轻量轮询，避免切换空间时竞态；轻量
+  路径不调用 `syncModelWorkspace`。
+- **协作复核**：Ark 完成功能实现；MiniMax M3 指出工作区切换时全量/轻量请求可能
+  重叠，集成阶段已用 `loading` 门禁修正；agy 使用既有桌面认证做独立只读复核。
+- **验证**：前端 74 项 Node 测试通过；DSH preset 构建、bundle 身份重写、
+  `node --check lib/index.js && node --check lib/client.js` 和 `git diff --check` 通过。
+- **待验收**：未重启运行中的 DSH；需配合新版藏知 API，用真实文档观察
+  `0 → 处理中 → 0`。
+
+## 2026-09-01：Markdown 表格退回原文修复（ADR-005 修订）
+
+- **问题**：证据正文超过 64 KiB 时，前端先判定“不可格式化”再决定是否截断，导致
+  大型 GFM 表格直接进入 `<pre>`，重新显示 `| 列 |`、`| --- |` 等 Markdown 符号。
+  普通资料正文仍固定走 `<pre>`，从不同入口打开同一资料也会出现两种结果。
+- **修复**：抽出 `WorkbenchMarkdownPreview`，普通资料与版本绑定证据统一默认使用
+  DSH `MarkdownText`；超长内容先截断到 64 KiB，再判断并格式化，原文仍可手动切换。
+  截断定位从逐字符重复编码改为二分查找，超大表格回归由约 1.8 秒降到约 3 毫秒。
+- **验证**：新增超长 GFM 表格回归；75 项 Node 测试、DSH preset 构建、bundle
+  身份重写、产物语法检查及 `git diff --check` 通过。当前运行 Profile 尚未刷新。
+
+## 2026-09-01：预览渲染器按类型路由（ADR-008）
+
+- **问题**：数据表摘要、Markdown 正文和 PDF / Word 抽取文本都可能包含
+  Markdown 符号；仅根据 `context_markdown` 选渲染器会让不同文档类型相互混淆。
+- **实现**：新增 `preview-routing.mjs` 纯函数路由层，优先使用藏知返回的
+  `evidence_type`、`document_type`、`dataset` 和 `table_location`。数据表走分页表格，
+  Markdown / 笔记走 DSH `MarkdownText`，PDF / Word 走文档预览，普通文本走 `<pre>`；
+  扩展名和保守的内容识别只用于旧载荷兼容。
+- **浏览器控制**：按 Computer Use 规范检查 Orca，实际运行时报
+  `Linux Computer Use requires python3-gi and AT-SPI packages`；系统已安装对应包，
+  但 Orca 进程未加载其 Python 路径。为避免重启 Orca 中断当前会话，
+  改用隔离的无头 Chrome + DevTools Protocol 执行页面级点击与 DOM 验收。
+- **验证**：新增 4 组路由回归；全量 79 项 Node 测试、DSH preset 构建、
+  bundle 身份重写、`npm run check` 和 `git diff --check` 通过。`web` Profile 安装产物与仓库
+  `lib/client.js` SHA-256 一致；独立启动 3090 / 3082 临时端口后，页面与插件状态均返回
+  HTTP 200，藏知 API 连接正常、14 个工具已配置，实际下发 bundle 包含新的
+  `evidence_type` / `document_type` 路由和数据集降级视图。临时服务验证后已停止。
+  随后刷新并平滑重启当前 3080 DSH，状态为 `apiConnected=true`、
+  `mcpConfigured=true`、`toolCount=14`，真实页面可点开藏知管理中心，无
+  ModuleLoader / 注册错误。隔离浏览器无用户藏知登录态，其账户状态 401 符合预期。
+
+## 2026-09-01：数据集目录证据改为真实分页表格
+
+- **现象**：`dataset_catalog` 已被正确分类为数据集，但因为发现线索没有
+  `source_rows`，工作台仍把“数集 / 字段 / 代表行”目录摘要当作降级内容。
+- **修复**：版本绑定上下文核验通过后，从 `context.dataset.dataset_id` 与工具载荷
+  交叉确认数据集身份。无贡献行的目录线索进入完整分页表格；有贡献行的证据继续
+  只显示实际回答所使用的行。数据集 ID 冲突时终止预览，不猜测或冒用其他表。
+- **验证**：新增数据集身份一致性回归，并覆盖 `document_type=xlsx` 的元数据路由；
+  80 项 Node 测试、DSH preset 构建、bundle 身份重写、`npm run check` 和
+  `git diff --check` 通过。刷新 `web` Profile 并重启 3080 DSH，源码与 Profile bundle
+  SHA-256 一致，实际下发产物包含“版本绑定目录数据集”分页分支。
+
 ## 2026-09-01：最终证据与发现线索分层（ADR-006）
 
 - **问题**：同一轮先由 `knowledge_search` 找到数据表目录，再由
