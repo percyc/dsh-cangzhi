@@ -45,6 +45,7 @@
 
 ## 当前协作任务
 
+- 已完成：整理 0.12.0 对外项目说明，新增完整英文 `README.en.md`，同步中文语言入口、统一工作台配置路径与发布包文件清单。公开文档敏感地址扫描无命中，`npm pack --dry-run` 确认中英文说明均进入包，112 项测试与 `git diff --check` 通过；提交后将 `main` 推送至全部已配置 Git 远端。负责人：Codex 集成。
 - 代码完成、浏览器待验收：藏知会话入口与工作台交互收口（ADR-012）。输入框上方、首页和会话头重复入口已移除，`conversation.input.left` 紧凑按钮直接打开工作台；会话开关、空间、登录/连接和连接设置已合并；桌面拖拽范围为响应式 420–1200px。112 项测试、构建、语法检查、Profile 重装和 DSH 启动通过。
 - 已完成：DSH Web 目录选择固定为浏览器内 `browse` 模式。`web/cordis.patch.yml` 禁用 `directory-picker-auto`，显式装载 browse Host 与 Client 两端；`~/.local/bin/reload-dsh` 在每次重载时校验三项组合条件，并继续以 `--trusted-host dsh.inner.percy.fun` 启动。109 项插件测试、配置 dump、HTTP 就绪检查通过；当前自动化会话无可用浏览器 surface，点击目录树仍需人工快速验收。
 - 代码完成、浏览器待验收：预览竞态与草稿保护（ADR-011）。Codex 集成、Ark 请求生命周期辅助模块；newapi MiniMax M3 复核已发起。旧请求不能提交内容或错误；关闭/换空间取消请求；准备提问保留纯文字草稿，结构化或提交中草稿拒绝重写。历史空间身份未实施迁移，仅增加明确提示。

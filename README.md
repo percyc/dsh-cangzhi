@@ -1,5 +1,7 @@
 # dsh-cangzhi
 
+[简体中文](./README.md) | [English](./README.en.md)
+
 `dsh-cangzhi` 是藏知面向 DeepSeek Harness（DSH）的独立适配器。藏知继续专注知识库、检索、证据、PAT 与 MCP 服务；本项目负责 DSH 内的原生界面、同源代理、凭据保管、知识空间选择和 MCP 接入。
 
 它不要求与藏知源码放在同一目录，也不会导入藏知的内部 Python/TypeScript 模块。连接只使用藏知公开的 HTTP API、Web 页面和 MCP 协议。
@@ -70,7 +72,7 @@ export DSH_PROFILE=web
 
 ## 配置
 
-安装后进入“设置 → 插件 → 藏知”，可以配置 API 地址、Web 地址和默认知识空间。这些值由 DSH 原生设置服务持久化到 `$DSH_HOME/settings.yaml`，保存后重启 DSH 生效；页面中的“测试连接”只检查候选 API，不会修改配置。
+安装后点击对话输入工具栏中的“藏知”打开工作台，再进入“设置”；也可以使用 DSH 的“设置 → 插件 → 藏知”。两处使用同一份配置，可维护 API 地址、Web 地址和默认知识空间。这些值由 DSH 原生设置服务持久化到 `$DSH_HOME/settings.yaml`，保存后重启 DSH 生效；页面中的“测试连接”只检查候选 API，不会修改配置。
 
 部署环境仍可通过以下变量提供机器级配置：
 

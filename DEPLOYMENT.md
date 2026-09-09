@@ -119,7 +119,7 @@ DSH 会在 `$DSH_HOME/profiles/web`（默认 `~/.dsh/profiles/web`）维护 Prof
 
 ### 方式 A：在 DSH 中配置
 
-不要设置 `CANGZHI_API_URL`、`CANGZHI_WEB_URL` 和 `CANGZHI_WORKSPACE`，启动 DSH 后进入“设置 → 插件 → 藏知”。填写服务地址与默认空间，点击“测试连接”，保存并重启 DSH。
+不要设置 `CANGZHI_API_URL`、`CANGZHI_WEB_URL` 和 `CANGZHI_WORKSPACE`。启动 DSH 后，可从对话输入工具栏点击“藏知”，在统一工作台中进入“设置”；也可以进入“设置 → 插件 → 藏知”。填写服务地址与默认空间，点击“测试连接”，保存并重启 DSH。两个入口使用同一份 DSH 设置。
 
 页面不会管理 MCP 监听端口或 PAT：端口属于进程部署配置，PAT 由 DSH credentials 单独保管。
 

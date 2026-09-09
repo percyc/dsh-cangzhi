@@ -15,6 +15,7 @@
     "lib/client.js.map",
     "cordis.patch.yml",
     "README.md",
+    "README.en.md",
     "DEPLOYMENT.md",
     "HANDOFF.md",
     "LICENSE"
