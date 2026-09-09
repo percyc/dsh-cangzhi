@@ -411,3 +411,10 @@
 - 从本地 DSH contract 确认 useInput 与 inputActions.setDraft 的语义。新增 draft-prompt 与 3 项测试，保留原文字、避免重复追加；带引用 occurrence 或非 plain 阶段拒绝重写。草稿事件与反馈绑定 sessionId。
 - 历史 EvidenceLink 无可信空间身份，提示仅在当前空间核验版本；后续可信空间元数据迁移仍未实施。新增 ADR-011 记录兼容边界。
 - 109 项测试（无跳过）、DSH preset 构建及产物语法检查通过；未完成浏览器交互验收。MiniMax M3 只读复核已发起，结果另行记录，不预先声明通过。
+
+## 2026-09-09：固定网页内目录选择并加固重载脚本
+
+- 核对 DSH `0.1.5-alpha.1` 源码：`directory-picker-auto` 只有在本机回环绑定、非 SSH 启动且存在可用显示会话时才选择 native；当前 SSH 且无 `DISPLAY`/`WAYLAND_DISPLAY` 的启动环境原本应选择 browse，但自动判断会随启动环境变化。
+- 将 `~/.dsh/profiles/web/cordis.patch.yml` 固定为 browse：禁用 `directory-picker-auto`，显式装载 `@deepseek-ai/dsh-host-directory-picker-browse` 与 `@deepseek-ai/dsh-client-ui-directory-picker-browse`。当前版本直接组合 browse 后端不会替代 Client surface，二者缺一不可。
+- 加固 `~/.local/bin/reload-dsh`：配置 dump 除校验 `dsh-cangzhi` 外，还校验 auto 已禁用和 browse 的 Host/Client 两端均存在；可信 Host `dsh.inner.percy.fun` 继续通过 `--trusted-host` 保留。
+- 实际运行重载：插件构建、语法检查、109 项测试、file 快照重装、组合配置检查和 token HTTP 就绪检查全部通过，DSH 在 `127.0.0.1:3080` 启动。当前自动化会话没有可用浏览器 surface，网页按钮点击验收留作人工快速检查。
