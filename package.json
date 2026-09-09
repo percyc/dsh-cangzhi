@@ -1,6 +1,6 @@
 {
   "name": "dsh-cangzhi",
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Standalone DeepSeek Harness adapter for Cangzhi knowledge services",
   "type": "module",
   "main": "lib/index.js",

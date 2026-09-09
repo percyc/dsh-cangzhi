@@ -281,9 +281,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
+type WorkbenchTab = 'browse' | 'preview' | 'context' | 'settings'
+
 interface ConsoleSnapshot {
   readonly open: boolean
   readonly knowledgeOpen: boolean
+  readonly knowledgeTab: WorkbenchTab
 }
 
 interface ConsoleSource {
@@ -297,15 +300,15 @@ interface ConsoleFace {
   subscribeSession(listener: () => void): () => void
   openConsole(): void
   closeConsole(): void
-  openKnowledge(): void
+  openKnowledge(tab?: WorkbenchTab): void
   closeKnowledge(): void
 }
 
 function createConsoleFace(ctx: ClientContext): ConsoleFace {
-  let snapshot: ConsoleSnapshot = { open: false, knowledgeOpen: false }
+  let snapshot: ConsoleSnapshot = { open: false, knowledgeOpen: false, knowledgeTab: 'browse' }
   const listeners = new Set<() => void>()
   const publish = (next: ConsoleSnapshot): void => {
-    if (next.open === snapshot.open && next.knowledgeOpen === snapshot.knowledgeOpen) return
+    if (next.open === snapshot.open && next.knowledgeOpen === snapshot.knowledgeOpen && next.knowledgeTab === snapshot.knowledgeTab) return
     snapshot = next
     for (const listener of listeners) listener()
   }
@@ -320,9 +323,9 @@ function createConsoleFace(ctx: ClientContext): ConsoleFace {
     hooks: { cangzhiConsole: source },
     currentSessionId: () => ctx.sessions.list.getSnapshot().current,
     subscribeSession: listener => ctx.sessions.list.subscribe(listener),
-    openConsole: () => { publish({ open: true, knowledgeOpen: false }) },
+    openConsole: () => { publish({ ...snapshot, open: true, knowledgeOpen: false }) },
     closeConsole: () => { publish({ ...snapshot, open: false }) },
-    openKnowledge: () => { publish({ open: false, knowledgeOpen: true }) },
+    openKnowledge: (tab = snapshot.knowledgeTab) => { publish({ open: false, knowledgeOpen: true, knowledgeTab: tab }) },
     closeKnowledge: () => { publish({ ...snapshot, knowledgeOpen: false }) },
   }
 }
@@ -1067,6 +1070,77 @@ function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, us
   </>
 }
 
+type KnowledgeToolButtonProps = PropsRuntime<'conversation.input.left'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
+
+/** Compact DSH-native tool-row entry. The workbench owns all controls; this
+ * component only mirrors authoritative Host state and keeps draft insertion
+ * bound to the current Session input machine. */
+function KnowledgeToolButton({ sessionId, useCangzhiConsole, openKnowledge, inputActions, useInput, t }: KnowledgeToolButtonProps) {
+  const inputSnapshot = useInput(value => value)
+  const inputSnapshotRef = useRef(inputSnapshot)
+  inputSnapshotRef.current = inputSnapshot
+  const state = useCangzhiConsole(value => value)
+  const session = useKnowledgeSession(sessionId)
+  const [configured, setConfigured] = useState(false)
+  const [workspaceLabel, setWorkspaceLabel] = useState(t('popoverWorkspace'))
+
+  const load = async () => {
+    const [statusResponse, workspaceResponse] = await Promise.all([
+      fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
+      fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' }),
+    ])
+    if (statusResponse.ok) {
+      const status = await statusResponse.json() as PluginStatus
+      setConfigured(Boolean(status.mcpConfigured))
+    }
+    if (!workspaceResponse.ok) return
+    const scoped = await workspaceResponse.json() as { workspace?: string }
+    if (!scoped.workspace) return
+    const workspacesResponse = await fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' })
+    const workspaces = workspacesResponse.ok ? await workspacesResponse.json() as Workspace[] : []
+    setWorkspaceLabel(workspaces.find(item => item.slug === scoped.workspace)?.name ?? scoped.workspace)
+  }
+
+  useEffect(() => {
+    void load().catch(() => { setConfigured(false) })
+    const refresh = () => { void load().catch(() => { setConfigured(false) }) }
+    const useDocument = (event: Event) => {
+      const detail = (event as CustomEvent<{ prompt?: string; sessionId?: string }>).detail
+      if (detail?.sessionId !== sessionId || typeof detail.prompt !== 'string') return
+      const prepared = prepareKnowledgeDraft(inputSnapshotRef.current, detail.prompt)
+      if (!prepared.error) {
+        inputActions.setDraft(prepared.draft)
+        inputSnapshotRef.current = { ...inputSnapshotRef.current, draft: prepared.draft }
+      }
+      window.dispatchEvent(new CustomEvent('cangzhi-draft-feedback', { detail: {
+        sessionId, message: prepared.error ?? '已保留原草稿并准备资料提示，请检查输入框后发送；本操作不会自动开启藏知。',
+      } }))
+    }
+    window.addEventListener('cangzhi-workspace-changed', refresh)
+    window.addEventListener(POLICY_EVENT, refresh)
+    window.addEventListener('cangzhi-use-document', useDocument)
+    return () => {
+      window.removeEventListener('cangzhi-workspace-changed', refresh)
+      window.removeEventListener(POLICY_EVENT, refresh)
+      window.removeEventListener('cangzhi-use-document', useDocument)
+    }
+  }, [sessionId, inputActions])
+
+  const enabled = configured && session.policy === 'on'
+  const title = `${workspaceLabel} · ${session.policy === 'on' ? t('popoverPolicyOn') : t('popoverPolicyOff')}`
+  return <button
+    type="button"
+    className={css.knowledgeToolButton}
+    data-state={enabled ? 'on' : configured ? 'off' : 'warning'}
+    title={title}
+    aria-label={`藏知：${title}`}
+    aria-expanded={state.knowledgeOpen}
+    onClick={() => openKnowledge('context')}
+  >
+    <CangzhiMark size={18}/><span>藏知</span><i aria-hidden/>
+  </button>
+}
+
 type ConversationKnowledgeHeaderProps = PropsRuntime<'conversation.session.header.actions'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
 function ConversationKnowledgeHeader({ sessionId, openKnowledge, t }: ConversationKnowledgeHeaderProps) {
@@ -1148,8 +1222,7 @@ interface CangzhiSettingsFace {
   settingsScope: SettingsScope<ConnectionSettings>
 }
 
-type CangzhiSettingsTabProps = PropsRuntime<'settings.plugins.tab'>
-  & PropsLocale<typeof NS> & InjectFace<CangzhiSettingsFace>
+type CangzhiSettingsTabProps = PropsLocale<typeof NS> & InjectFace<CangzhiSettingsFace>
 
 function validConnectionUrl(value: string): boolean {
   try {
@@ -1964,9 +2037,8 @@ function ConsoleOverlay({ useCangzhiConsole, closeConsole, t }: ConsoleOverlayPr
   )
 }
 
-type KnowledgeWorkbenchProps = InjectFace<ConsoleFace>
+type KnowledgeWorkbenchProps = InjectFace<ConsoleFace & CangzhiSettingsFace> & PropsLocale<typeof NS>
 type WorkbenchDocument = { id: number; title: string; source_type: string; content_kind?: string; document_type?: string; dataset_id?: number; updated_at?: string; category?: string; snippet?: string }
-type WorkbenchTab = 'browse' | 'preview' | 'context'
 type PreviewTable = { datasetId: number; columns: string[]; rows: Array<Record<string, unknown>>; total: number; offset: number; limit: number; evidenceVersionId?: number; evidenceMode?: 'catalog' }
 type EvidenceContextPayload = {
   evidence_type: string
@@ -2164,7 +2236,7 @@ function KnowledgeWorkbench(props: KnowledgeWorkbenchProps) {
   return <SessionKnowledgeWorkbench key={sessionId ?? 'new-conversation'} {...props}/>
 }
 
-function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscribeSession, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
+function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscribeSession, openKnowledge, closeKnowledge, openConsole, settingsScope, t }: KnowledgeWorkbenchProps) {
   const state = useCangzhiConsole(value => value)
   const sessionId = useSyncExternalStore(subscribeSession, currentSessionId)
   const knowledgeSession = useKnowledgeSession(sessionId)
@@ -2177,7 +2249,11 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     return () => window.removeEventListener('cangzhi-draft-feedback', feedback)
   }, [sessionId])
   const [auth, setAuth] = useState<AuthState | null>(null)
+  const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([])
   const [results, setResults] = useState<WorkbenchDocument[]>([])
   const [query, setQuery] = useState('')
@@ -2195,7 +2271,7 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
   const [previewState, setPreviewState] = useState('选择资料后可在这里预览原文')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
-  const [width, setWidth] = useState(() => readWorkbenchWidthFromStorage(window.localStorage))
+  const [width, setWidth] = useState(() => readWorkbenchWidthFromStorage(window.localStorage, window.innerWidth))
   const uploadInput = useRef<HTMLInputElement>(null)
   const resizeStart = useRef({ x: 0, width: WORKBENCH_SIZE_TABLE.standard })
   const widthRef = useRef(width)
@@ -2229,6 +2305,9 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
   }
   useEffect(() => () => { previewRequests.current.invalidate() }, [])
   useEffect(() => {
+    if (state.knowledgeOpen) setTab(state.knowledgeTab)
+  }, [state.knowledgeOpen, state.knowledgeTab])
+  useEffect(() => {
     if (!state.knowledgeOpen) {
       previewRequests.current.invalidate()
       setBusy(false)
@@ -2243,18 +2322,20 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
   const load = async () => {
     const requestId = ++loadRequestRef.current
     const previousWorkspaceSlug = workspaceSlugRef.current
-    const [authResponse, modelWorkspaceResponse] = await Promise.all([
+    const [authResponse, modelWorkspaceResponse, pluginResponse] = await Promise.all([
       fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' }),
       sessionId === undefined
         ? Promise.resolve(null)
         : fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' }),
+      fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
     ])
     if (!authResponse.ok) throw new Error(await errorMessage(authResponse, '登录状态读取失败'))
     const authValue = await authResponse.json() as AuthState
     if (requestId !== loadRequestRef.current) return
     setAuth(authValue)
+    if (pluginResponse.ok) setPlugin(await pluginResponse.json() as PluginStatus)
     if (!authValue.authenticated) {
-      setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null)
+      setWorkspace(null); setWorkspaces([]); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null)
       workspaceSlugRef.current = null
       return
     }
@@ -2269,9 +2350,10 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
       throw new Error('当前对话知识空间读取失败，请重试')
     }
     workspaceSlugRef.current = modelWorkspaceSlug
-    const [documentsResponse, workspaceResponse] = await Promise.all([
+    const [documentsResponse, workspaceResponse, workspacesResponse] = await Promise.all([
       workspaceFetch(`${API}/documents/overview?limit=60&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
       workspaceFetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+      fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
     ])
     if (!workspaceResponse.ok || !documentsResponse.ok) throw new Error('当前知识空间读取失败')
     const nextWorkspace = await workspaceResponse.json() as Workspace
@@ -2279,6 +2361,7 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     const workspaceChanged = previousWorkspaceSlug !== null && previousWorkspaceSlug !== nextWorkspace.slug
     workspaceSlugRef.current = nextWorkspace.slug
     setWorkspace(nextWorkspace)
+    setWorkspaces(workspacesResponse.ok ? await workspacesResponse.json() as Workspace[] : [nextWorkspace])
     const items = await documentsResponse.json() as DocumentItem[]
     if (requestId !== loadRequestRef.current) return
     setDocuments(items.map(item => ({ id: item.id, title: item.title, source_type: item.source_type, content_kind: item.content_kind, updated_at: item.updated_at, category: item.primary_category?.name })))
@@ -2309,6 +2392,76 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
       frame.style.removeProperty('--cangzhi-workbench-width')
     }
   }, [state.knowledgeOpen, width])
+
+  const provisionConnection = async (): Promise<void> => {
+    const tokenResponse = await fetch(`${API}/access-tokens`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'DSH 对话插件', scopes: ['knowledge:read', 'knowledge:search', 'knowledge:ask'] }),
+    })
+    if (!tokenResponse.ok) throw new Error(await errorMessage(tokenResponse, '令牌创建失败'))
+    const { token } = await tokenResponse.json() as { token: string }
+    const setup = await fetch('/_cangzhi-plugin/token', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
+    })
+    if (!setup.ok) throw new Error(await errorMessage(setup, 'DSH 凭据写入失败'))
+  }
+  const login = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (busy) return
+    setBusy(true); setNotice('正在登录藏知…')
+    try {
+      const response = await fetch(`${API}/auth/login`, {
+        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+      })
+      if (!response.ok) throw new Error(await errorMessage(response, '登录失败'))
+      await provisionConnection()
+      setLoginPassword('')
+      setNotice('登录成功，藏知对话工具已连接')
+      await load()
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : '登录失败，请重试') }
+    finally { setBusy(false) }
+  }
+  const connect = async () => {
+    if (busy) return
+    setBusy(true); setNotice('正在连接藏知对话工具…')
+    try { await provisionConnection(); setNotice('藏知对话工具已连接'); await load() }
+    catch (caught) { setNotice(caught instanceof Error ? caught.message : '连接失败，请重试') }
+    finally { setBusy(false) }
+  }
+  const disconnect = async () => {
+    if (busy) return
+    setBusy(true); setNotice('')
+    try {
+      const response = await fetch('/_cangzhi-plugin/token', { method: 'DELETE' })
+      if (!response.ok) throw new Error(await errorMessage(response, '断开失败'))
+      setPlugin(value => value === null ? null : { ...value, mcpConfigured: false, toolCount: 0 })
+      setNotice('已断开藏知对话工具')
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : '断开失败，请重试') }
+    finally { setBusy(false) }
+  }
+  const switchWorkspace = async (slug: string) => {
+    const next = workspaces.find(item => item.slug === slug)
+    if (next === undefined || next.slug === workspace?.slug || busy) return
+    setBusy(true); setNotice('正在切换知识空间…')
+    try {
+      await syncModelWorkspace(next.slug, sessionId)
+      setWorkspaceCookie(next.slug)
+      workspaceSlugRef.current = next.slug
+      setWorkspace(next)
+      setNotice(`已切换到“${next.name}”`)
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : '知识空间切换失败') }
+    finally { setBusy(false) }
+  }
+  const setConversationPolicy = async (next: KnowledgePolicy) => {
+    if (busy || next === knowledgeSession.policy) return
+    setBusy(true); setNotice('')
+    try {
+      await knowledgeSession.setPolicy(next)
+      setNotice(next === 'on' ? '本对话已启用藏知' : '本对话已关闭藏知；下一步不会调用藏知工具')
+    } catch (caught) { setNotice(caught instanceof Error ? caught.message : '藏知能力切换失败') }
+    finally { setBusy(false) }
+  }
   const search = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!workspace || busy || searching) return
@@ -2512,7 +2665,7 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     resizeStart.current = { x: event.clientX, width }
   }
   const resizeWithKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    const next = resizeWorkbenchWithKey(width, event.key)
+    const next = resizeWorkbenchWithKey(width, event.key, window.innerWidth)
     if (next === null) return
     event.preventDefault()
     widthRef.current = next
@@ -2521,7 +2674,7 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
   }
   const resize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
-    const next = clampWorkbenchWidth(resizeStart.current.width + resizeStart.current.x - event.clientX)
+    const next = clampWorkbenchWidth(resizeStart.current.width + resizeStart.current.x - event.clientX, window.innerWidth)
     widthRef.current = next
     setWidth(next)
   }
@@ -2537,9 +2690,13 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
   const visible = submittedQuery ? results : documents
   return <aside className={css.knowledgeWorkbench} aria-label="藏知工作台" style={{ width }}>
     <div className={css.workbenchResize} role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整藏知工作台宽度：左键加宽，右键收窄，Home 最窄，End 最宽" aria-valuemin={WORKBENCH_SIZE_MIN} aria-valuemax={WORKBENCH_SIZE_MAX} aria-valuenow={width} onKeyDown={resizeWithKeyboard} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize}/>
-    <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div><button title="知识库管理" onClick={openConsole}>⚙</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
-    <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
-    {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
+    <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div><button title="连接设置" onClick={() => setTab('settings')}>⚙</button><button title="知识库管理中心" onClick={openConsole}>↗</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
+    <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>本对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button><button data-active={String(tab === 'settings')} onClick={() => setTab('settings')}>设置</button></nav>
+    {tab === 'settings' ? <div className={css.workbenchSettings}><CangzhiSettingsTab settingsScope={settingsScope} t={t}/></div> : auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <form className={css.workbenchLogin} onSubmit={login}><CangzhiMark size={44}/><h3>登录后使用藏知</h3><p>登录和连接都在当前工作台完成，不再打开额外弹窗。</p><input value={loginUsername} onChange={event => setLoginUsername(event.target.value)} placeholder="用户名" autoComplete="username" required/><input value={loginPassword} onChange={event => setLoginPassword(event.target.value)} placeholder="密码" type="password" autoComplete="current-password" required/><button disabled={busy}>{busy ? '正在连接…' : '登录并连接'}</button></form> : <>
+      <section className={css.workbenchControls} aria-label="藏知会话控制">
+        <div><span><strong>本对话使用藏知</strong><small>{knowledgeSession.policy === 'on' ? '下一步允许调用藏知工具' : '下一步不会调用藏知工具'}</small></span><div className={css.workbenchPolicy} role="radiogroup" aria-label="本对话是否使用藏知"><button type="button" role="radio" aria-checked={knowledgeSession.policy === 'off'} data-active={String(knowledgeSession.policy === 'off')} disabled={busy} onClick={() => void setConversationPolicy('off')}>关闭</button><button type="button" role="radio" aria-checked={knowledgeSession.policy === 'on'} data-active={String(knowledgeSession.policy === 'on')} disabled={busy} onClick={() => void setConversationPolicy('on')}>开启</button></div></div>
+        <div><label><strong>知识空间</strong><select value={workspace?.slug ?? ''} disabled={busy || workspaces.length === 0} onChange={event => void switchWorkspace(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select></label><button type="button" disabled={busy} onClick={() => void (plugin?.mcpConfigured ? disconnect() : connect())}>{plugin?.mcpConfigured ? '断开连接' : '连接工具'}</button></div>
+      </section>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} aria-label="搜索当前空间资料" onChange={event => { if (!event.target.value.trim()) clearSearch(); else setQuery(event.target.value) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy || searching || !workspace}>{searching ? '搜索中…' : '搜索'}</button>{(query || submittedQuery) && <button type="button" onClick={clearSearch} aria-label="清除搜索，返回最近资料">清除</button>}</form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy || !workspace}>＋</button></div><div className={css.drawerSectionTitle}><strong>{submittedQuery ? `“${submittedQuery}”的搜索结果` : '最近资料'}</strong><span role="status">{searching ? '搜索中，暂保留原列表…' : `${visible.length} 项`}</span></div><div className={css.workbenchResults} aria-busy={searching}>{visible.length === 0 ? <div className={css.drawerEmpty}>{submittedQuery ? '没有找到匹配资料，请尝试更短的关键词或清除搜索。' : '当前空间暂无资料，可以上传文件或前往知识库管理。'}</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
       {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '再次准备提问' : '准备提问'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <div className={css.exactEvidencePreview}>{classifyDocumentPreview({ contentKind: selected?.content_kind, sourceType: selected?.source_type, documentType: selected?.document_type, title: selected?.title }) === 'markdown' ? <WorkbenchMarkdownPreview markdown={previewText}/> : <pre className={css.markdownPreview}>{previewText}</pre>}</div> : previewTable ? <div className={css.tablePreview}><p>{previewTable.evidenceMode === 'catalog' && previewTable.evidenceVersionId !== undefined ? `版本绑定目录数据集 · version ${previewTable.evidenceVersionId} · ` : ''}共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
       {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>提问参考资料</strong><small>{knowledgeSession.policy === 'off' ? '本对话藏知已关闭；浏览资料不会自动开启检索。' : `当前空间：${workspace?.name ?? '读取中'}。`} 此列表仅为本次打开对话时的临时记录，不代表模型已读取资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未准备参考资料。预览资料后点击“准备提问”，检查输入框并发送后才会交给模型。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button disabled={pinned.length === 0} onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { sessionId, prompt: `请综合以下藏知资料，归纳共同结论、分歧与依据，并逐条标注来源：${pinned.map(item => `《${item.title}》（document_id: ${item.id}）`).join('、')}。\n\n` } }))}>准备综合提问</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { sessionId, prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
@@ -2701,23 +2858,11 @@ export function apply(ctx: ClientContext): void {
     settingsScope: ctx.settingsScope.bind<ConnectionSettings>({ namespace: NS }),
   }
 
-  ctx.slots.inject('conversation.hero.context', () => ctx.slots.register({
-    name: 'conversation.hero.context', id: 'cangzhi-home', order: 10,
+  ctx.slots.inject('conversation.input.left', () => ctx.slots.register({
+    name: 'conversation.input.left', id: 'cangzhi-tool', order: -20,
     locale: NS,
     inject: () => consoleFace,
-  }, HomeIntegration))
-
-  ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
-    name: 'conversation.input.dock', id: 'cangzhi-context', order: -20,
-    locale: NS,
-    inject: () => consoleFace,
-  }, KnowledgeDock))
-
-  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
-    name: 'conversation.session.header.actions', id: 'cangzhi-knowledge-space', order: 20,
-    locale: NS,
-    inject: () => consoleFace,
-  }, ConversationKnowledgeHeader))
+  }, KnowledgeToolButton))
 
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
@@ -2746,7 +2891,8 @@ export function apply(ctx: ClientContext): void {
 
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay', id: 'cangzhi-knowledge-workbench', order: 90,
-    inject: () => consoleFace,
+    locale: NS,
+    inject: () => ({ ...consoleFace, ...settingsFace }),
   }, KnowledgeWorkbench))
 
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({

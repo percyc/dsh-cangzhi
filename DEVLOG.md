@@ -418,3 +418,11 @@
 - 将 `~/.dsh/profiles/web/cordis.patch.yml` 固定为 browse：禁用 `directory-picker-auto`，显式装载 `@deepseek-ai/dsh-host-directory-picker-browse` 与 `@deepseek-ai/dsh-client-ui-directory-picker-browse`。当前版本直接组合 browse 后端不会替代 Client surface，二者缺一不可。
 - 加固 `~/.local/bin/reload-dsh`：配置 dump 除校验 `dsh-cangzhi` 外，还校验 auto 已禁用和 browse 的 Host/Client 两端均存在；可信 Host `dsh.inner.percy.fun` 继续通过 `--trusted-host` 保留。
 - 实际运行重载：插件构建、语法检查、109 项测试、file 快照重装、组合配置检查和 token HTTP 就绪检查全部通过，DSH 在 `127.0.0.1:3080` 启动。当前自动化会话没有可用浏览器 surface，网页按钮点击验收留作人工快速检查。
+
+## 2026-09-09：0.12.0 会话工具入口与工作台收口（ADR-012）
+
+- 将会话主入口从全宽 `conversation.input.dock` 迁到 DSH `conversation.input.left`，紧凑按钮与指令、附件处于同一工具行；运行组合不再注册首页卡片、全宽 Dock 和会话头部三个重复入口，点击直接进入工作台“本对话”。
+- 工作台新增统一会话控制区：开关继续调用 Host `session-policy`，空间继续按 `sessionId` 写入 Host，登录后在同一面板创建 DSH 专用令牌，连接/断开不再依赖 Popover。设置视图直接复用 `CangzhiSettingsTab` 的 SettingsScope、管理员锁、连接测试和重启提示逻辑。
+- 工作台仍只提供连续拖拽；宽度从固定 360–760px 调整为 420–1200px，实际最大值同时受 `viewport - 360px` 约束，默认 640px，移动端保持全宽。补 viewport 上限与新宽度边界测试。
+- 新增 `tests/workbench-shell.test.mjs`，锁定工具行唯一入口、直接打开统一工作台和设置组件复用；全套 112 项测试通过。使用 DSH `0.1.5-alpha.1` preset 构建通过（Host 81.21 kB；Client 284.50 kB），产物语法和 `git diff --check` 通过。
+- 执行 `~/.local/bin/reload-dsh` 完成 file 插件快照重装、browse 目录选择配置校验和 HTTP 就绪检查；DSH 已在 `127.0.0.1:3080` 运行并保留可信 Host。当前自动化会话仍无可用浏览器 surface，工具栏位置、抽屉拖拽和设置交互需人工浏览器快速验收。

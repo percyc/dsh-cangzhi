@@ -4,14 +4,14 @@
  * directly via Node without bundling the React component tree.
  */
 
-export const WORKBENCH_SIZE_MIN = 360
-export const WORKBENCH_SIZE_MAX = 760
-export const WORKBENCH_FULLSCREEN_MAX = 1100
+export const WORKBENCH_SIZE_MIN = 420
+export const WORKBENCH_SIZE_MAX = 1200
+export const WORKBENCH_FULLSCREEN_MAX = 1400
 
 export const WORKBENCH_SIZE_TABLE = Object.freeze({
-  narrow: 420,
-  standard: 520,
-  wide: 720,
+  narrow: 480,
+  standard: 640,
+  wide: 960,
 })
 
 export const WORKBENCH_SIZES = Object.freeze(['narrow', 'standard', 'wide'])
@@ -34,16 +34,21 @@ export function isWorkbenchSize(value) {
   return typeof value === 'string' && SIZE_KEYS.has(value)
 }
 
-export function clampWorkbenchWidth(value) {
-  if (!Number.isFinite(value)) return WORKBENCH_SIZE_TABLE.standard
-  return Math.min(WORKBENCH_SIZE_MAX, Math.max(WORKBENCH_SIZE_MIN, Math.round(value)))
+export function resolveWorkbenchMaxWidth(viewportWidth) {
+  if (!Number.isFinite(viewportWidth)) return WORKBENCH_SIZE_MAX
+  return Math.max(WORKBENCH_SIZE_MIN, Math.min(WORKBENCH_SIZE_MAX, Math.floor(viewportWidth - 360)))
 }
 
-export function resizeWorkbenchWithKey(width, key) {
+export function clampWorkbenchWidth(value, viewportWidth = Number.POSITIVE_INFINITY) {
+  if (!Number.isFinite(value)) return WORKBENCH_SIZE_TABLE.standard
+  return Math.min(resolveWorkbenchMaxWidth(viewportWidth), Math.max(WORKBENCH_SIZE_MIN, Math.round(value)))
+}
+
+export function resizeWorkbenchWithKey(width, key, viewportWidth = Number.POSITIVE_INFINITY) {
   if (key === 'Home') return WORKBENCH_SIZE_MIN
-  if (key === 'End') return WORKBENCH_SIZE_MAX
-  if (key === 'ArrowLeft') return clampWorkbenchWidth(width + 20)
-  if (key === 'ArrowRight') return clampWorkbenchWidth(width - 20)
+  if (key === 'End') return resolveWorkbenchMaxWidth(viewportWidth)
+  if (key === 'ArrowLeft') return clampWorkbenchWidth(width + 20, viewportWidth)
+  if (key === 'ArrowRight') return clampWorkbenchWidth(width - 20, viewportWidth)
   return null
 }
 
@@ -62,13 +67,13 @@ function makeStorageLike(getItem) {
   }
 }
 
-export function readWorkbenchWidthFromStorage(storage) {
+export function readWorkbenchWidthFromStorage(storage, viewportWidth = Number.POSITIVE_INFINITY) {
   const reader = makeStorageLike(storage.getItem.bind(storage))
   const saved = Number(reader.getItem('cangzhi-workbench-width'))
   if (!Number.isFinite(saved) || saved < WORKBENCH_SIZE_MIN || saved > WORKBENCH_SIZE_MAX) {
     return WORKBENCH_SIZE_TABLE.standard
   }
-  return clampWorkbenchWidth(saved)
+  return clampWorkbenchWidth(saved, viewportWidth)
 }
 
 export function readWorkbenchSizeFromStorage(storage) {

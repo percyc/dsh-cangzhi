@@ -22,6 +22,7 @@ import {
   readWorkbenchInitialState,
   readWorkbenchSizeFromStorage,
   readWorkbenchWidthFromStorage,
+  resolveWorkbenchMaxWidth,
   sizeGlyph,
   sizeLabel,
 } from '../src/client/lib/workbench-size.mjs'
@@ -45,7 +46,7 @@ function makeStorage(values) {
   }
 }
 
-test('workbench size — table covers the legacy 360..760 range with three named presets', () => {
+test('workbench size — table covers the responsive 420..1200 range with legacy preset compatibility', () => {
   for (const size of WORKBENCH_SIZES) {
     const width = WORKBENCH_SIZE_TABLE[size]
     assert.ok(width >= WORKBENCH_SIZE_MIN, `${size} preset is below the legacy min`)
@@ -72,11 +73,14 @@ test('workbench size — isWorkbenchSize only accepts the three presets', () => 
   assert.ok(!isWorkbenchSize(720))
 })
 
-test('workbench size — clampWorkbenchWidth respects the legacy 360..760 window', () => {
+test('workbench size — clampWorkbenchWidth respects the responsive desktop window', () => {
   assert.equal(clampWorkbenchWidth(0), WORKBENCH_SIZE_MIN)
   assert.equal(clampWorkbenchWidth(100), WORKBENCH_SIZE_MIN)
   assert.equal(clampWorkbenchWidth(420.4), 420)
-  assert.equal(clampWorkbenchWidth(800), WORKBENCH_SIZE_MAX)
+  assert.equal(clampWorkbenchWidth(800), 800)
+  assert.equal(clampWorkbenchWidth(1300), WORKBENCH_SIZE_MAX)
+  assert.equal(resolveWorkbenchMaxWidth(1000), 640)
+  assert.equal(clampWorkbenchWidth(900, 1000), 640)
   assert.equal(clampWorkbenchWidth(NaN), WORKBENCH_SIZE_TABLE.standard)
 })
 
@@ -93,12 +97,12 @@ test('workbench size — storage readers fall back to safe defaults', () => {
   assert.equal(readWorkbenchFullscreenFromStorage(empty), false)
 })
 
-test('workbench size — storage readers migrate legacy width only when in range', () => {
+test('workbench size — storage readers preserve widths in the expanded range', () => {
   const ok = makeStorage({ 'cangzhi-workbench-width': '500' })
   assert.equal(readWorkbenchWidthFromStorage(ok), 500)
   const tooSmall = makeStorage({ 'cangzhi-workbench-width': '200' })
   assert.equal(readWorkbenchWidthFromStorage(tooSmall), WORKBENCH_SIZE_TABLE.standard)
-  const tooBig = makeStorage({ 'cangzhi-workbench-width': '900' })
+  const tooBig = makeStorage({ 'cangzhi-workbench-width': '1300' })
   assert.equal(readWorkbenchWidthFromStorage(tooBig), WORKBENCH_SIZE_TABLE.standard)
   const junk = makeStorage({ 'cangzhi-workbench-width': 'abc' })
   assert.equal(readWorkbenchWidthFromStorage(junk), WORKBENCH_SIZE_TABLE.standard)
@@ -124,10 +128,10 @@ test('workbench size — readWorkbenchInitialState lets the preset own both widt
   assert.deepEqual(narrow, { size: 'narrow', width: WORKBENCH_SIZE_TABLE.narrow, fullscreen: true })
 })
 
-test('workbench size — readWorkbenchInitialState infers the preset from a legacy width only', () => {
-  const dragged = readWorkbenchInitialState(makeStorage({ 'cangzhi-workbench-width': '500' }))
+test('workbench size — readWorkbenchInitialState infers the preset from a saved width only', () => {
+  const dragged = readWorkbenchInitialState(makeStorage({ 'cangzhi-workbench-width': '600' }))
   assert.equal(dragged.size, 'standard')
-  assert.equal(dragged.width, 500)
+  assert.equal(dragged.width, 600)
   assert.equal(dragged.fullscreen, false)
   const empty = readWorkbenchInitialState(makeStorage({}))
   assert.equal(empty.size, 'standard')
