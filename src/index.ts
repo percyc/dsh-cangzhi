@@ -11,9 +11,15 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { createProxyHandler } from './proxy.ts'
+import type {} from '@deepseek-ai/dsh-storage'
+import { createMemoryStore } from './host/session-state.mjs'
+import { createDomainStore } from './host/domain-store.mjs'
+import { createSessionManager } from './host/session-manager.mjs'
+import { sessionStateDomainSpec } from './host/storage-open.mjs'
+import { CANGZHI_TOOLS } from './host/tool-names.mjs'
 
 export const name = 'cangzhi'
-export const inject = ['systemPrompt', 'webServer', 'connection', 'credentials', 'settings', 'agents']
+export const inject = ['systemPrompt', 'tools', 'webServer', 'connection', 'credentials', 'settings', 'agents']
 
 export interface Config {
   webUrl: string
@@ -44,22 +50,6 @@ const CONTROL_ROUTE_PREFIX = '/_cangzhi-plugin'
 const DEFAULT_MCP_PORT = 3081
 const WORKSPACE_SLUG = /^[a-z0-9][a-z0-9-]{0,63}$/
 const SETTINGS_NAMESPACE = 'cangzhi' as SettingsNamespace
-const CANGZHI_TOOLS = [
-  'mcp__cangzhi__knowledge_list_scopes',
-  'mcp__cangzhi__knowledge_list_facets',
-  'mcp__cangzhi__knowledge_list_documents',
-  'mcp__cangzhi__knowledge_search',
-  'mcp__cangzhi__knowledge_ask',
-  'mcp__cangzhi__knowledge_get_document',
-  'mcp__cangzhi__knowledge_get_chunk',
-  'mcp__cangzhi__knowledge_list_datasets',
-  'mcp__cangzhi__knowledge_get_dataset_schema',
-  'mcp__cangzhi__knowledge_preview_dataset_rows',
-  'mcp__cangzhi__knowledge_query_dataset',
-  'mcp__cangzhi__knowledge_get_evidence_by_chunk',
-  'mcp__cangzhi__knowledge_get_evidence_by_dataset',
-  'mcp__cangzhi__knowledge_preview_evidence_rows',
-] as const
 const ConnectionSettingsSchema: Schema<ConnectionSettings> = Schema.object({
   apiUrl: Schema.string(),
   webUrl: Schema.string(),
@@ -164,7 +154,56 @@ Use its mcp__cangzhi__knowledge_* tools whenever the user asks to find, inspect,
 Prefer knowledge_search for retrieval, knowledge_ask for a synthesized answer with citations, and the dataset schema/preview/query tools for structured data.
 Never invent document ids, chunk ids, dataset ids, scope names, evidence, or citations. Discover them with list/search tools first, preserve returned citation metadata, and say clearly when Cangzhi is unavailable or has no supporting result.
 The Cangzhi button in the DSH sidebar opens a native DSH knowledge workspace for uploads, documents, categories, spaces and processing maintenance.
-The active Cangzhi workspace selected in the UI is also the workspace used by every model tool. Never claim to search another workspace unless the user switches it in the Cangzhi workspace selector first.`
+The active Cangzhi workspace for this conversation is chosen in the Cangzhi workspace selector and is used by every model tool in this conversation. Never claim to search another workspace unless the user switches it for this conversation first.`
+
+function validSessionId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256
+}
+
+/** Agent shape the manager needs from the DSH registry. */
+type LiveAgent = { id: string; ctx: Context; session: { header: { parentSession?: string } } }
+
+type SessionStore = ReturnType<typeof createMemoryStore>
+
+async function openPersistentStore(
+  ctx: Context,
+): Promise<{ store: SessionStore; persistence: 'domain' | 'memory'; close?: () => Promise<void> }> {
+  // Cordis exposes injected services as `ctx.<key>` AND through `ctx.get(key)`.
+  // Either is valid; `ctx.get('storage')` returns `undefined` when the host
+  // profile does not declare the `storage` inject, so we explicitly coerce the
+  // result through a presence check before calling `.domain.open(...)`.
+  const storage = ctx.get('storage') as { domain?: { open: (spec: unknown) => Promise<unknown> } } | undefined
+  if (storage === undefined || typeof storage.domain?.open !== 'function') {
+    ctx.logger.warn('cangzhi: DSH storage hub is unavailable; per-session state will not survive a Host restart')
+    return { store: createMemoryStore(), persistence: 'memory' }
+  }
+  try {
+    const domain = await storage.domain.open(sessionStateDomainSpec()) as unknown as { table: (name: string) => unknown; close: () => Promise<void> }
+    if (typeof domain.table !== 'function' || typeof domain.close !== 'function') {
+      throw new Error('opened storage domain is missing the table()/close() surface')
+    }
+    const workspaces = domain.table('workspaces') as {
+      get: (key: string) => string | undefined
+      entries: () => Iterable<[string, string]>
+      put: (key: string, value: string) => Promise<unknown>
+      delete: (key: string) => Promise<unknown>
+    }
+    const policies = domain.table('policies') as {
+      get: (key: string) => 'on' | 'off' | undefined
+      entries: () => Iterable<[string, 'on' | 'off']>
+      put: (key: string, value: 'on' | 'off') => Promise<unknown>
+      delete: (key: string) => Promise<unknown>
+    }
+    return {
+      store: createDomainStore({ workspaces, policies }) as unknown as SessionStore,
+      persistence: 'domain',
+      close: () => domain.close(),
+    }
+  } catch (error) {
+    ctx.logger.warn(`cangzhi: storage-domain unavailable, using in-memory session state (will not survive restart): ${String(error)}`)
+    return { store: createMemoryStore(), persistence: 'memory' }
+  }
+}
 
 export async function apply(ctx: Context, config: Config): Promise<void> {
   const baseSettings = normalizeConnectionSettings({
@@ -190,20 +229,52 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const webUrl = activeConnection.webUrl
   const apiUrl = activeConnection.apiUrl
   const internalMcpPort = mcpPort(config.internalMcpPort)
+  // Process-global default used by the generic `cangzhi-mcp` bridge (degraded
+  // fallback) and by sessions that pinned no workspace. Every scoped, per-session
+  // tool call resolves its own workspace from the store instead, so this value is
+  // NEVER a session-isolation boundary.
   let activeWorkspaceSlug = activeConnection.defaultWorkspace
+
   const webProxy = createProxyHandler(webUrl, { allowFrames: true })
   const apiProxy = createProxyHandler(apiUrl, {
     stripPrefix: API_ROUTE_PREFIX,
     upstreamPrefix: '/api',
   })
   const mcpProxy = createProxyHandler(apiUrl, {
-    headers: async () => {
+    headers: async (req) => {
       const resolved = await ctx.credentials.resolve(TOKEN_REF)
       if (resolved === undefined) throw new Error('CANGZHI_TOKEN is not configured')
-      return {
+      const headers: Record<string, string> = {
         authorization: `Bearer ${resolved.value}`,
-        'x-cangzhi-workspace': activeWorkspaceSlug,
       }
+      // Trust boundary on the per-call workspace annotation.
+      // The plugin's own loopback proxy listens on 127.0.0.1 and is reachable
+      // by every in-process plugin, not just our scoped override. We accept
+      // three classes of caller:
+      //   1. A scoped override attaches `x-cangzhi-workspace` to every call,
+      //      resolved from the store for the executing session. That value is
+      //      already validated against the workspace slug regex; we re-validate
+      //      here so a corrupted caller cannot leak a bogus header upstream.
+      //   2. The unscoped `cangzhi-mcp` bridge sends no workspace header; we
+      //      fall back to the process default ONLY for callers that omit the
+      //      header and only after a workspace-format check, so the unscoped
+      //      bridge can still reach the same upstream the override uses.
+      //   3. Any other in-process caller that omits the header gets the
+      //      process default; the upstream cangzhi API still validates the
+      //      workspace exists and is active for the user's PAT, so this is
+      //      not a privilege escalation — it is the same surface the
+      //      `cangzhi-mcp` bridge exposes to the unscoped model.
+      const raw = req.headers['x-cangzhi-workspace']
+      const candidate = Array.isArray(raw) ? raw[0] : raw
+      if (typeof candidate === 'string' && candidate.length > 0) {
+        if (!WORKSPACE_SLUG.test(candidate)) {
+          throw new Error(`x-cangzhi-workspace header is not a valid workspace slug: ${candidate}`)
+        }
+        headers['x-cangzhi-workspace'] = candidate
+      } else {
+        headers['x-cangzhi-workspace'] = activeWorkspaceSlug
+      }
+      return headers
     },
   })
   const mcpServer = createServer((req, res) => {
@@ -223,54 +294,47 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     order: 155,
     text: GUIDANCE,
   })
-  type SessionPolicy = { disposePrompt: () => void; disposeRestriction: () => void }
-  const sessionPolicies = new Map<string, SessionPolicy>()
-  const desiredPolicies = new Map<string, boolean>()
-  const applySessionPolicy = (agent: { id: string; ctx: Context; session: { header: { parentSession?: string } } }, enabled: boolean): void => {
-    const previous = sessionPolicies.get(agent.id)
-    previous?.disposePrompt()
-    previous?.disposeRestriction()
-    sessionPolicies.delete(agent.id)
-    if (enabled) return
-    const disposePrompt = agent.ctx.systemPrompt.section({
-      // A scoped empty section shadows the global guidance for this session.
-      name: 'integration:cangzhi',
-      order: 155,
-      text: '',
-    })
-    const disposeRestriction = agent.ctx.tools.restrict({ deny: [...CANGZHI_TOOLS] })
-    sessionPolicies.set(agent.id, { disposePrompt, disposeRestriction })
+
+  // ---- Per-session durable state + lifecycle wiring ----
+  const { store, persistence, close: closeStore } = await openPersistentStore(ctx)
+  if (closeStore !== undefined) {
+    ctx.effect(() => () => void closeStore(), 'cangzhi session state domain close')
   }
-  const propagatePolicyToChildren = (parentId: string, enabled: boolean): void => {
-    const list = (ctx.agents as unknown as { list(): Array<{ id: string; session: { header: { parentSession?: string } } }> }).list()
-    for (const candidate of list) {
-      if (candidate.session.header.parentSession !== parentId) continue
-      desiredPolicies.set(candidate.id, enabled)
-      applySessionPolicy(candidate as { id: string; ctx: Context; session: { header: { parentSession?: string } } }, enabled)
-    }
+  const internalMcpBaseUrl = `http://127.0.0.1:${internalMcpPort}`
+  const agentsFacade = {
+    get: (id: string | undefined) => (ctx.agents.get as unknown as (id: string) => LiveAgent | undefined)(id as string),
+    list: () => (ctx.agents as unknown as { list(): LiveAgent[] }).list(),
+  } as {
+    get: (id: string | undefined) => LiveAgent | undefined
+    list: () => LiveAgent[]
   }
-  ctx.on('agent/created', ({ agent }) => {
-    const parentId = agent.session.header.parentSession
-    const inheritedFromParent = parentId !== undefined && desiredPolicies.get(parentId) === false
-    const enabled = desiredPolicies.get(agent.id) ?? (inheritedFromParent ? false : true)
-    desiredPolicies.set(agent.id, enabled)
-    applySessionPolicy(agent, enabled)
+  const manager = createSessionManager({
+    store,
+    defaultWorkspace: activeWorkspaceSlug,
+    internalMcpBaseUrl,
+    agentsFacade,
+    tools: ctx.tools,
+    log: (message) => ctx.logger.warn(message),
   })
-  ctx.on('agent/disposed', ({ agent }) => {
-    const policy = sessionPolicies.get(agent.id)
-    policy?.disposePrompt()
-    policy?.disposeRestriction()
-    sessionPolicies.delete(agent.id)
-    desiredPolicies.delete(agent.id)
-  })
-  ctx.effect(() => () => {
-    for (const policy of sessionPolicies.values()) {
-      policy.disposePrompt()
-      policy.disposeRestriction()
-    }
-    sessionPolicies.clear()
-    desiredPolicies.clear()
-  }, 'cangzhi session knowledge policy cleanup')
+
+  ctx.on('agent/created', (payload: { agent: LiveAgent }) => manager.onAgentCreated(payload.agent))
+  ctx.on('agent/disposed', (payload: { agent: LiveAgent }) => manager.onAgentDisposed(payload.agent))
+  ctx.on('tools/change', () => manager.onToolsChange())
+  ctx.effect(() => () => manager.disposeAll(), 'cangzhi session knowledge state cleanup')
+
+  // Startup catch-up: the cangzhi plugin's `apply` runs whenever the host
+  // loads it. The `agent/created` event only fires AFTER we subscribed, so
+  // any agent already alive at this point would otherwise never get a
+  // scoped override. Walk the live registry once and replay the create
+  // notification for every pre-existing agent. The same applies to the
+  // `tools/change` notification: the bridge may have registered its
+  // `mcp__cangzhi__*` tools before the manager subscribed, so force a
+  // first sweep to point existing overrides at the current global set.
+  for (const live of (ctx.agents as unknown as { list(): LiveAgent[] }).list()) {
+    manager.onAgentCreated(live)
+  }
+  manager.onToolsChange()
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: WEB_ROUTE_PREFIX,
@@ -320,22 +384,58 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       res.end(JSON.stringify({
         apiConnected: true,
         mcpConfigured: credential.configured,
-        toolCount: 14,
+        toolCount: CANGZHI_TOOLS.length,
         activeWorkspace: activeWorkspaceSlug,
+        sessionIsolation: true,
+        persistence,
         connectionSettings: settingsStatus(connectionSettings, activeConnection, config, locks),
       }))
     },
   }), 'cangzhi plugin status')
+
+  const badRequest = (res: import('node:http').ServerResponse, message: string) => {
+    res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(JSON.stringify({ error: message }))
+  }
+  const writeJson = (res: import('node:http').ServerResponse, value: unknown) => {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+    res.end(JSON.stringify(value))
+  }
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: `${CONTROL_ROUTE_PREFIX}/workspace`,
     handler: async (req, res) => {
       const rejection = ctx.connection.requestRejection(req)
       if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
-      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST' }); res.end(); return }
+      if (req.method === 'GET') {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (!validSessionId(sessionId)) {
+          badRequest(res, '会话标识无效：workspace 查询必须显式携带 sessionId')
+          return
+        }
+        const resolved = manager.resolveWorkspaceFor(sessionId)
+        const policy = manager.resolvePolicyFor(sessionId)
+        writeJson(res, {
+          sessionId,
+          workspace: resolved.workspace,
+          bound: resolved.bound,
+          degraded: !resolved.bound,
+          policy: policy.policy,
+          persistence,
+        })
+        return
+      }
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'GET, POST' }); res.end(); return }
       try {
         const body = await jsonBody(req)
         const slug = typeof body.slug === 'string' ? body.slug.trim().toLowerCase() : ''
+        const processDefault = body.processDefault === true
+        if (!processDefault && !validSessionId(body.sessionId)) {
+          badRequest(res, '请显式携带 sessionId；未绑定会话时不提供进程级空间切换')
+          return
+        }
         if (!WORKSPACE_SLUG.test(slug)) throw new Error('知识空间标识格式无效')
         const validationUrl = apiEndpoint(apiUrl, `/api/workspaces/${encodeURIComponent(slug)}`)
         const cookie = req.headers.cookie
@@ -345,15 +445,24 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         if (!validation.ok) throw new Error(`知识空间不可用（HTTP ${String(validation.status)}）`)
         const workspace = await validation.json() as { status?: string }
         if (workspace.status !== 'active') throw new Error('知识空间已归档')
-        activeWorkspaceSlug = slug
+        if (processDefault) {
+          // Explicitly annotated process-level mutation (degraded, not isolated).
+          activeWorkspaceSlug = slug
+          res.writeHead(204, { 'cache-control': 'no-store' })
+          res.end()
+          return
+        }
+        const sessionId = body.sessionId as string
+        const applied = await manager.setWorkspace(sessionId, slug)
+        if (!applied) throw new Error('知识空间标识无效')
         res.writeHead(204, { 'cache-control': 'no-store' })
         res.end()
       } catch (error) {
-        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+        badRequest(res, error instanceof Error ? error.message : String(error))
       }
     },
   }), 'cangzhi workspace selection')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: `${CONTROL_ROUTE_PREFIX}/session-policy`,
@@ -362,37 +471,66 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
       if (req.method === 'GET') {
         const url = new URL(req.url ?? '/', 'http://localhost')
-        const sessionId = (url.searchParams.get('sessionId') ?? '').trim()
-        if (sessionId.length === 0 || sessionId.length > 256) {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-          res.end(JSON.stringify({ error: '会话标识无效' }))
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        if (!validSessionId(sessionId)) {
+          badRequest(res, '会话标识无效')
           return
         }
-        const desired = desiredPolicies.get(sessionId) ?? true
-        const live = (ctx.agents.get as unknown as (id: string) => { id: string } | undefined)(sessionId)
-        const restricted = sessionPolicies.has(sessionId)
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(JSON.stringify({ sessionId, desired, live: live !== undefined, restricted }))
+        const policy = manager.resolvePolicyFor(sessionId)
+        const agent = agentsFacade.get(sessionId)
+        writeJson(res, {
+          sessionId,
+          enabled: policy.policy === 'on',
+          desired: policy.policy,
+          live: agent !== undefined,
+          restricted: policy.policy === 'off',
+          bound: policy.bound,
+        })
         return
       }
       if (req.method !== 'POST') { res.writeHead(405, { allow: 'GET, POST' }); res.end(); return }
       try {
         const body = await jsonBody(req)
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
-        if (sessionId.length === 0 || sessionId.length > 256) throw new Error('会话标识无效')
+        if (!validSessionId(sessionId)) throw new Error('会话标识无效')
         if (typeof body.enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
-        desiredPolicies.set(sessionId, body.enabled)
-        const agent = (ctx.agents.get as unknown as (id: string) => { id: string; ctx: Context; session: { header: { parentSession?: string } } } | undefined)(sessionId)
-        if (agent !== undefined) applySessionPolicy(agent, body.enabled)
-        propagatePolicyToChildren(sessionId, body.enabled)
-        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(JSON.stringify({ applied: agent !== undefined, sessionId, enabled: body.enabled }))
+        const applied = await manager.setPolicy(sessionId, body.enabled ? 'on' : 'off')
+        if (!applied) throw new Error('策略未生效')
+        writeJson(res, { applied: true, sessionId, enabled: body.enabled, persistence })
       } catch (error) {
-        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+        badRequest(res, error instanceof Error ? error.message : String(error))
       }
     },
   }), 'cangzhi session knowledge policy')
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: `${CONTROL_ROUTE_PREFIX}/session-state`,
+    handler: async (req, res) => {
+      const rejection = ctx.connection.requestRejection(req)
+      if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
+      if (req.method !== 'GET') { res.writeHead(405, { allow: 'GET' }); res.end(); return }
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const sessionId = (url.searchParams.get('sessionId') ?? '').trim()
+      if (!validSessionId(sessionId)) {
+        badRequest(res, '会话标识无效')
+        return
+      }
+      const ws = manager.resolveWorkspaceFor(sessionId)
+      const pol = manager.resolvePolicyFor(sessionId)
+      writeJson(res, {
+        sessionId,
+        workspace: ws.workspace,
+        workspaceBound: ws.bound,
+        policy: pol.policy,
+        policyBound: pol.bound,
+        degraded: !ws.bound,
+        live: agentsFacade.get(sessionId) !== undefined,
+        persistence,
+      })
+    },
+  }), 'cangzhi session state')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: `${CONTROL_ROUTE_PREFIX}/token`,
@@ -405,8 +543,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           res.writeHead(204, { 'cache-control': 'no-store' })
           res.end()
         } catch (error) {
-          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+          badRequest(res, error instanceof Error ? error.message : String(error))
         }
         return
       }
@@ -425,11 +562,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         res.writeHead(204, { 'cache-control': 'no-store' })
         res.end()
       } catch (error) {
-        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+        badRequest(res, error instanceof Error ? error.message : String(error))
       }
     },
   }), 'cangzhi token setup')
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: `${CONTROL_ROUTE_PREFIX}/settings/test`,
@@ -450,14 +587,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         const readinessUrl = apiEndpoint(candidate.apiUrl, '/api/readiness')
         const readiness = await fetch(readinessUrl, { signal: AbortSignal.timeout(5_000) })
         if (!readiness.ok) throw new Error(`藏知 API readiness 返回 HTTP ${String(readiness.status)}`)
-        res.writeHead(200, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        })
-        res.end(JSON.stringify({ ok: true, apiUrl: candidate.apiUrl }))
+        writeJson(res, { ok: true, apiUrl: candidate.apiUrl })
       } catch (error) {
-        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+        badRequest(res, error instanceof Error ? error.message : String(error))
       }
     },
   }), 'cangzhi connection settings test')

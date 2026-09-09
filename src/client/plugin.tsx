@@ -19,11 +19,14 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from './Cangzhi.module.css'
+import { createLatestRequest } from './lib/latest-request.mjs'
+import { prepareKnowledgeDraft } from './lib/draft-prompt.mjs'
 import {
   WORKBENCH_SIZE_MIN,
   WORKBENCH_SIZE_MAX,
   WORKBENCH_SIZE_TABLE,
   clampWorkbenchWidth,
+  resizeWorkbenchWithKey,
   readWorkbenchWidthFromStorage,
 } from './lib/workbench-size.mjs'
 import {
@@ -114,6 +117,7 @@ const zh = {
   popoverWorkspaceHint: '切换后模型工具立即使用新空间',
   popoverLoginFailed: '登录失败，请检查账号密码后重试',
   popoverScopeNote: '仅对当前对话生效',
+  popoverScopeDegraded: '此对话未绑定知识空间，当前使用进程默认空间（未隔离）',
   popoverScopeGlobal: '当前没有可绑定的对话',
   popoverConnect: '启用模型检索',
   popoverDisconnect: '断开 DSH 对话连接',
@@ -209,6 +213,7 @@ const en = {
   popoverWorkspaceHint: 'The new selection is used by the next MCP call immediately.',
   popoverLoginFailed: 'Login failed. Check your username and password and try again.',
   popoverScopeNote: 'Applies only to this conversation',
+  popoverScopeDegraded: 'This conversation has no bound workspace; using the process default (not isolated)',
   popoverScopeGlobal: 'No conversation is selected',
   popoverConnect: 'Enable model retrieval',
   popoverDisconnect: 'Disconnect DSH conversation',
@@ -330,14 +335,21 @@ function setWorkspaceCookie(slug: string): void {
   document.cookie = `cangzhi_workspace=${encodeURIComponent(slug)}; Path=/; Max-Age=31536000; SameSite=Lax`
 }
 
-async function syncModelWorkspace(slug: string): Promise<void> {
+async function syncModelWorkspace(slug: string, sessionId?: string): Promise<void> {
+  if (sessionId === undefined) {
+    // No DSH session to bind: do not mutate any process-global workspace.
+    // The popover must show the degraded, explicitly-unbound state instead of
+    // claiming session isolation.
+    window.dispatchEvent(new CustomEvent('cangzhi-workspace-changed', { detail: { slug, sessionId: undefined, bound: false } }))
+    return
+  }
   const response = await fetch('/_cangzhi-plugin/workspace', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ slug }),
+    body: JSON.stringify({ slug, sessionId }),
   })
   if (!response.ok) throw new Error(await errorMessage(response, '模型知识空间切换失败'))
-  window.dispatchEvent(new CustomEvent('cangzhi-workspace-changed', { detail: { slug } }))
+  window.dispatchEvent(new CustomEvent('cangzhi-workspace-changed', { detail: { slug, sessionId, bound: true } }))
 }
 
 type KnowledgePolicy = 'off' | 'on'
@@ -392,6 +404,18 @@ function useKnowledgeSession(sessionId?: string): KnowledgeSessionState {
     const nextKey = sessionId ?? loadSessionKey()
     setSessionKey(nextKey)
     setPolicyState(loadPolicy(nextKey))
+    if (sessionId === undefined) return
+    let alive = true
+    void fetch(`/_cangzhi-plugin/session-policy?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })
+      .then(async response => {
+        if (!response.ok) throw new Error('无法读取对话知识策略')
+        const value = await response.json() as { desired?: string }
+        if (alive && isKnowledgePolicy(value.desired)) {
+          setPolicyState(value.desired)
+          savePolicy(nextKey, value.desired)
+        }
+      }).catch(() => { /* Keep the last display; Host remains the enforcement boundary. */ })
+    return () => { alive = false }
   }, [sessionId])
   useEffect(() => {
     const refresh = (event: Event) => {
@@ -477,7 +501,23 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [policyError, setPolicyError] = useState('')
+  const [sessionWorkspace, setSessionWorkspace] = useState<{ workspace: string; bound: boolean } | null>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (sessionId === undefined) { setSessionWorkspace(null); return }
+    let alive = true
+    fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })
+      .then(response => response.ok ? response.json() as Promise<{ workspace: string; bound: boolean }> : null)
+      .then(value => { if (alive) setSessionWorkspace(value) })
+      .catch(() => { if (alive) setSessionWorkspace(null) })
+    const update = (event: Event) => {
+      const detail = (event as CustomEvent<{ bound?: boolean; slug?: string; sessionId?: string }>).detail
+      if (detail?.sessionId !== undefined && detail.sessionId !== sessionId) return
+      if (detail?.slug !== undefined) setSessionWorkspace({ workspace: detail.slug, bound: detail.bound === true })
+    }
+    window.addEventListener('cangzhi-workspace-changed', update)
+    return () => { alive = false; window.removeEventListener('cangzhi-workspace-changed', update) }
+  }, [sessionId])
   useEffect(() => {
     if (anchor === null) { setPosition(null); return }
     const update = () => {
@@ -638,6 +678,9 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
                 ))}
               </select>
             </label>
+            {sessionId !== undefined && sessionWorkspace !== null && !sessionWorkspace.bound && (
+              <p className={css.popoverScopeNote} data-degraded="true">{t('popoverScopeDegraded')}</p>
+            )}
           </section>
         )
       )}
@@ -662,7 +705,7 @@ function KnowledgePopover(props: KnowledgePopoverProps) {
 
 type HomeIntegrationProps = InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function HomeIntegration({ hooks, openConsole, openKnowledge, t }: HomeIntegrationProps) {
+function HomeIntegration({ currentSessionId, subscribeSession, openConsole, openKnowledge, t }: HomeIntegrationProps) {
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
@@ -671,28 +714,70 @@ function HomeIntegration({ hooks, openConsole, openKnowledge, t }: HomeIntegrati
   const [notice, setNotice] = useState('')
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const sessionId = useSyncExternalStore(hooks.cangzhiConsole.subscribeSession, hooks.cangzhiConsole.currentSessionId)
-
-  const load = async () => {
+  const loadRequestRef = useRef(0)
+  const sessionId = useSyncExternalStore(subscribeSession, currentSessionId)
+  // Track which session a given sync call was bound to. The popover's
+  // workspace view is owned by the model/Host, not by the browser cookie:
+  // a stale `/workspaces/current` from another surface must never overwrite
+  // a session that already has a pin.
+  const load = async (overrideSessionId: string | undefined = sessionId) => {
+    const requestId = ++loadRequestRef.current
     const [authResponse, pluginResponse] = await Promise.all([
       fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' }),
       fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
     ])
     const authValue = await authResponse.json() as AuthState
+    if (requestId !== loadRequestRef.current) return
     setAuth(authValue)
     if (pluginResponse.ok) setPlugin(await pluginResponse.json() as PluginStatus)
     if (!authValue.authenticated) return
-    const [workspaceResponse, workspacesResponse] = await Promise.all([
+    const [workspaceResponse, workspacesResponse, modelResponse] = await Promise.all([
       fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
       fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
+      overrideSessionId !== undefined
+        ? fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(overrideSessionId)}`, { cache: 'no-store' })
+        : Promise.resolve(null),
     ])
     if (!workspaceResponse.ok || !workspacesResponse.ok) return
-    const currentWorkspace = await workspaceResponse.json() as Workspace
-    setWorkspace(currentWorkspace)
-    setWorkspaces(await workspacesResponse.json() as Workspace[])
-    await syncModelWorkspace(currentWorkspace.slug)
+    const [currentWorkspace, allWorkspaces] = await Promise.all([
+      workspaceResponse.json() as Promise<Workspace>,
+      workspacesResponse.json() as Promise<Workspace[]>,
+    ])
+    if (requestId !== loadRequestRef.current) return
+    setWorkspaces(allWorkspaces)
+    let modelWorkspace: Workspace | null = null
+    if (modelResponse !== null) {
+      const ok = modelResponse.ok ? modelResponse : null
+      const value = ok !== null ? await ok.json().catch(() => null) as { workspace?: string; bound?: boolean } | null : null
+      const slug = value?.workspace
+      if (typeof slug === 'string' && slug.length > 0) {
+        modelWorkspace = allWorkspaces.find(item => item.slug === slug) ?? { ...currentWorkspace, slug }
+      }
+    }
+    if (requestId !== loadRequestRef.current) return
+    if (modelWorkspace !== null) {
+      // The model/Host already owns the workspace for this session; do not
+      // let the browser cookie overwrite it. The popover shows the model
+      // workspace, the management UI will keep its own cangzhi-side view.
+      setWorkspace(modelWorkspace)
+    } else {
+      // The session has no model pin yet. Use the browser's cangzhi-side
+      // current workspace as the initial guess, and tell the Host to bind
+      // it so the next model step actually uses it. Without this, a fresh
+      // session would have the popover show one workspace and the model
+      // work in another.
+      setWorkspace(currentWorkspace)
+      if (overrideSessionId !== undefined) throw new Error('无法读取当前对话的知识空间，请重试')
+    }
   }
-  useEffect(() => { void load().catch(() => { setNotice('藏知服务暂时不可用') }) }, [])
+  useEffect(() => {
+    if (sessionId === undefined) {
+      // No conversation bound: show only the cangzhi-side current.
+      void load(undefined).catch(() => { setNotice('藏知服务暂时不可用') })
+      return
+    }
+    void load(sessionId).catch(() => { setNotice('藏知服务暂时不可用') })
+  }, [sessionId])
 
   const login = async (username: string, password: string): Promise<void> => {
     setBusy(true); setNotice('')
@@ -740,11 +825,14 @@ function HomeIntegration({ hooks, openConsole, openKnowledge, t }: HomeIntegrati
     if (next === undefined || next.slug === workspace?.slug) return
     setBusy(true); setNotice('正在切换知识空间…')
     try {
-      setWorkspaceCookie(next.slug)
-      await syncModelWorkspace(next.slug)
+      // Update the model-side first so the Host and local state agree, and
+      // only after the Host accepts the change update the cangzhi cookie
+      // (which the management UI uses as its default).
+      await syncModelWorkspace(next.slug, sessionId)
       setWorkspace(next)
+      setWorkspaceCookie(next.slug)
       setNotice(`已切换到"${next.name}"，新会话将使用这个空间`)
-      await load()
+      await load(sessionId)
     } catch (caught) { setNotice(caught instanceof Error ? caught.message : '知识空间切换失败') }
     finally { setBusy(false) }
   }
@@ -811,7 +899,10 @@ function HomeIntegration({ hooks, openConsole, openKnowledge, t }: HomeIntegrati
 
 type KnowledgeDockProps = PropsRuntime<'conversation.input.dock'> & InjectFace<ConsoleFace> & PropsLocale<typeof NS>
 
-function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, t }: KnowledgeDockProps) {
+function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, useInput, t }: KnowledgeDockProps) {
+  const inputSnapshot = useInput(value => value)
+  const inputSnapshotRef = useRef(inputSnapshot)
+  inputSnapshotRef.current = inputSnapshot
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [plugin, setPlugin] = useState<PluginStatus | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
@@ -820,31 +911,66 @@ function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, t 
   const [notice, setNotice] = useState('')
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const loadRequestRef = useRef(0)
   const session = useKnowledgeSession(sessionId)
 
-  const load = async () => {
-    const [authResponse, statusResponse, workspaceResponse] = await Promise.all([
+  const load = async (overrideSessionId: string | undefined = sessionId) => {
+    const requestId = ++loadRequestRef.current
+    const [authResponse, statusResponse, modelResponse] = await Promise.all([
       fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' }),
       fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
-      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+      overrideSessionId !== undefined
+        ? fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(overrideSessionId)}`, { cache: 'no-store' })
+        : Promise.resolve(null),
     ])
     if (authResponse.ok) {
       const authValue = await authResponse.json() as AuthState
+      if (requestId !== loadRequestRef.current) return
       setAuth(authValue)
       if (authValue.authenticated) {
-        const workspacesResponse = await fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' })
-        if (workspacesResponse.ok) setWorkspaces(await workspacesResponse.json() as Workspace[])
+        const [workspacesResponse, cookieWorkspaceResponse] = await Promise.all([
+          fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' }),
+          fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+        ])
+        const all = workspacesResponse.ok ? await workspacesResponse.json() as Workspace[] : []
+        if (requestId !== loadRequestRef.current) return
+        setWorkspaces(all)
+        const cookieWorkspace = cookieWorkspaceResponse.ok ? await cookieWorkspaceResponse.json() as Workspace : null
+        // Prefer the Host's model workspace; only fall back to the cangzhi
+        // cookie when the session has no model pin and no override was given.
+        let resolvedFromHost = false
+        if (modelResponse !== null && modelResponse.ok) {
+          const value = await modelResponse.json().catch(() => null) as { workspace?: string; bound?: boolean } | null
+          if (requestId !== loadRequestRef.current) return
+          const slug = value?.workspace
+          if (typeof slug === 'string' && slug.length > 0) {
+            setWorkspace(all.find(item => item.slug === slug) ?? { id: 0, slug, name: slug, is_default: false, status: 'active' as const })
+            resolvedFromHost = true
+          }
+        }
+        if (!resolvedFromHost && cookieWorkspace !== null) setWorkspace(cookieWorkspace)
       }
     }
-    if (statusResponse.ok) setPlugin(await statusResponse.json() as PluginStatus)
-    if (workspaceResponse.ok) setWorkspace(await workspaceResponse.json() as Workspace)
+    if (statusResponse.ok) {
+      const value = await statusResponse.json() as PluginStatus
+      if (requestId === loadRequestRef.current) setPlugin(value)
+    }
   }
   useEffect(() => {
-    void load().catch(() => { setNotice('藏知服务暂时不可用') })
-    const update = () => { void load().catch(() => { setNotice('藏知服务暂时不可用') }) }
+    void load(sessionId).catch(() => { setNotice('藏知服务暂时不可用') })
+    const update = () => { void load(sessionId).catch(() => { setNotice('藏知服务暂时不可用') }) }
     const useDocument = (event: Event) => {
-      const detail = (event as CustomEvent<{ prompt?: string }>).detail
-      if (typeof detail?.prompt === 'string') inputActions.setDraft(detail.prompt)
+      const detail = (event as CustomEvent<{ prompt?: string; sessionId?: string }>).detail
+      if (detail?.sessionId !== sessionId) return
+      if (typeof detail?.prompt !== 'string') return
+      const prepared = prepareKnowledgeDraft(inputSnapshotRef.current, detail.prompt)
+      if (!prepared.error) {
+        inputActions.setDraft(prepared.draft)
+        inputSnapshotRef.current = { ...inputSnapshotRef.current, draft: prepared.draft }
+      }
+      window.dispatchEvent(new CustomEvent('cangzhi-draft-feedback', { detail: {
+        sessionId, message: prepared.error ?? '已保留原草稿并准备资料提示，请检查输入框后发送；本操作不会自动开启藏知。',
+      } }))
     }
     window.addEventListener('cangzhi-workspace-changed', update)
     window.addEventListener('cangzhi-use-document', useDocument)
@@ -852,7 +978,7 @@ function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, t 
       window.removeEventListener('cangzhi-workspace-changed', update)
       window.removeEventListener('cangzhi-use-document', useDocument)
     }
-  }, [inputActions])
+  }, [sessionId, inputActions])
 
   const login = async (username: string, password: string): Promise<void> => {
     setBusy(true)
@@ -862,7 +988,7 @@ function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, t 
     })
     if (!response.ok) { setBusy(false); throw new Error(await errorMessage(response, '登录失败')) }
     setBusy(false)
-    await load()
+    await load(sessionId)
   }
   const connect = async () => {
     setBusy(true); setNotice('正在创建 DSH 专用访问令牌…')
@@ -876,23 +1002,23 @@ function KnowledgeDock({ sessionId, openKnowledge, openConsole, inputActions, t 
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }),
     })
     setNotice(setup.ok ? '连接成功，藏知工具正在自动上线' : await errorMessage(setup, 'DSH 凭据写入失败'))
-    setBusy(false); await load()
+    setBusy(false); await load(sessionId)
   }
   const disconnect = async () => {
     setBusy(true)
     const response = await fetch('/_cangzhi-plugin/token', { method: 'DELETE' })
     setNotice(response.ok ? '已断开 DSH 对话连接' : await errorMessage(response, '断开失败'))
-    setBusy(false); await load()
+    setBusy(false); await load(sessionId)
   }
   const switchWorkspace = async (slug: string) => {
     const next = workspaces.find(item => item.slug === slug)
     if (next === undefined || next.slug === workspace?.slug) return
     setBusy(true)
     try {
-      setWorkspaceCookie(next.slug)
-      await syncModelWorkspace(next.slug)
+      await syncModelWorkspace(next.slug, sessionId)
       setWorkspace(next)
-      await load()
+      setWorkspaceCookie(next.slug)
+      await load(sessionId)
     } finally { setBusy(false) }
   }
 
@@ -949,26 +1075,56 @@ function ConversationKnowledgeHeader({ sessionId, openKnowledge, t }: Conversati
   const [currentName, setCurrentName] = useState<string | null>(null)
   const session = useKnowledgeSession(sessionId)
   useEffect(() => {
+    let alive = true
     const load = async () => {
-      const [statusResponse, workspaceResponse] = await Promise.all([
+      const [statusResponse, modelResponse] = await Promise.all([
         fetch('/_cangzhi-plugin/status', { cache: 'no-store' }),
-        fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+        sessionId !== undefined
+          ? fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' })
+          : Promise.resolve(null),
       ])
+      if (!alive) return
       if (statusResponse.ok) {
         const status = await statusResponse.json() as PluginStatus
+        if (!alive) return
         setConfigured(status.mcpConfigured)
         setActiveSlug(status.activeWorkspace ?? 'default')
       }
+      if (modelResponse !== null && modelResponse.ok) {
+        const value = await modelResponse.json().catch(() => null) as { workspace?: string } | null
+        if (!alive) return
+        if (typeof value?.workspace === 'string' && value.workspace.length > 0) {
+          // Fetch the workspace name for display; fall back to the slug if the
+          // name lookup fails. We hit the public listing so the header can
+          // show a human-readable label without depending on the management
+          // UI's selection.
+          try {
+            const wsResponse = await fetch(`${API}/workspaces`, { credentials: 'include', cache: 'no-store' })
+            if (wsResponse.ok) {
+            const list = await wsResponse.json() as Workspace[]
+            if (!alive) return
+              const found = list.find(item => item.slug === value.workspace)
+              if (found !== undefined) { setCurrentName(found.name); return }
+            }
+          } catch { /* fall through */ }
+          setCurrentName(value.workspace)
+          return
+        }
+      }
+      // No session binding yet (or no session): fall back to the cangzhi
+      // cookie, which is what the management UI uses. The header reflects
+      // the model workspace when one exists, the cookie otherwise.
+      const workspaceResponse = await fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' })
       if (workspaceResponse.ok) {
         const workspace = await workspaceResponse.json() as Workspace
-        setCurrentName(workspace.name)
+        if (alive) setCurrentName(workspace.name)
       }
     }
     void load()
     const update = () => { void load() }
     window.addEventListener('cangzhi-workspace-changed', update)
-    return () => window.removeEventListener('cangzhi-workspace-changed', update)
-  }, [])
+    return () => { alive = false; window.removeEventListener('cangzhi-workspace-changed', update) }
+  }, [sessionId])
   const policyLabel = session.policy === 'off' ? t('popoverPolicyOff') : t('popoverPolicyOn')
   const display = currentName ?? (configured ? activeSlug : t('popoverLoginTitle'))
   return <button type="button" className={css.conversationKnowledgeHeader} title={t('popoverHeaderHint')} onClick={openKnowledge}>
@@ -1369,7 +1525,10 @@ function NativeWorkspace() {
             setWorkspaceFailures(failureResults.filter((item): item is WorkspaceFailure => item !== null))
           }
         }
-        await syncModelWorkspace(current.slug)
+        // The management console is a process-level view, not bound to a DSH
+        // conversation session. Do NOT sync its selection to any model
+        // workspace: session-isolated conversations resolve their own workspace
+        // and a console switch must never mutate a process-global default.
       }
     } catch (caught) { setError(caught instanceof Error ? caught.message : '藏知服务不可用') }
     finally { setLoading(false) }
@@ -1479,7 +1638,7 @@ function NativeWorkspace() {
     setLoading(true); setError('')
     try {
       setWorkspaceCookie(next.slug)
-      await syncModelWorkspace(next.slug)
+      // Console view only: never mutate a model workspace here (session-scoped).
       setCurrentWorkspace(next ?? null)
       setDocumentStatus('')
       setTab('overview')
@@ -1999,13 +2158,32 @@ function CangzhiEvidenceNode({ node }: CangzhiEvidenceNodeProps) {
   </section>
 }
 
-function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
+function KnowledgeWorkbench(props: KnowledgeWorkbenchProps) {
+  const sessionId = useSyncExternalStore(props.subscribeSession, props.currentSessionId)
+  // Remount session-local selections and pending preview setters on navigation.
+  return <SessionKnowledgeWorkbench key={sessionId ?? 'new-conversation'} {...props}/>
+}
+
+function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscribeSession, openKnowledge, closeKnowledge, openConsole }: KnowledgeWorkbenchProps) {
   const state = useCangzhiConsole(value => value)
+  const sessionId = useSyncExternalStore(subscribeSession, currentSessionId)
+  const knowledgeSession = useKnowledgeSession(sessionId)
+  useEffect(() => {
+    const feedback = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string; message?: string }>).detail
+      if (detail?.sessionId === sessionId && detail.message) setNotice(detail.message)
+    }
+    window.addEventListener('cangzhi-draft-feedback', feedback)
+    return () => window.removeEventListener('cangzhi-draft-feedback', feedback)
+  }, [sessionId])
   const [auth, setAuth] = useState<AuthState | null>(null)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([])
   const [results, setResults] = useState<WorkbenchDocument[]>([])
   const [query, setQuery] = useState('')
+  const [submittedQuery, setSubmittedQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const searchRequestRef = useRef(0)
   const [selected, setSelected] = useState<WorkbenchDocument | null>(null)
   const [tab, setTab] = useState<WorkbenchTab>('browse')
   const [pinned, setPinned] = useState<WorkbenchDocument[]>([])
@@ -2022,40 +2200,102 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   const resizeStart = useRef({ x: 0, width: WORKBENCH_SIZE_TABLE.standard })
   const widthRef = useRef(width)
   const workspaceSlugRef = useRef<string | null>(null)
+  const loadRequestRef = useRef(0)
   const tableRequestRef = useRef(0)
+  const previewRequests = useRef(createLatestRequest())
+  const previewWorkspaces = useRef(new WeakMap<object, Promise<string>>())
+  const fetchPreview = async (ticket: ReturnType<ReturnType<typeof createLatestRequest>['begin']>, input: RequestInfo | URL, init: RequestInit = {}) => {
+    let scope = previewWorkspaces.current.get(ticket)
+    if (!scope) {
+      scope = (async () => {
+        if (sessionId === undefined) {
+          if (!workspaceSlugRef.current) throw new Error('请等待知识空间载入后重试')
+          return workspaceSlugRef.current
+        }
+        const response = await fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store', signal: ticket.signal })
+        if (!response.ok) throw new Error('无法确认当前对话知识空间，请重试')
+        const value = await response.json() as { workspace?: string }
+        ticket.assertCurrent()
+        if (!value.workspace) throw new Error('当前对话知识空间尚未就绪')
+        return value.workspace
+      })()
+      previewWorkspaces.current.set(ticket, scope)
+    }
+    const slug = await scope
+    ticket.assertCurrent()
+    const headers = new Headers(init.headers)
+    headers.set('x-cangzhi-workspace', slug)
+    return fetch(input, { ...init, headers, signal: ticket.signal })
+  }
+  useEffect(() => () => { previewRequests.current.invalidate() }, [])
+  useEffect(() => {
+    if (!state.knowledgeOpen) {
+      previewRequests.current.invalidate()
+      setBusy(false)
+      setPreviewState('预览已暂停，请重新选择资料。')
+    }
+  }, [state.knowledgeOpen])
+  const workspaceFetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const headers = new Headers(init.headers)
+    if (workspaceSlugRef.current !== null) headers.set('x-cangzhi-workspace', workspaceSlugRef.current)
+    return fetch(input, { ...init, headers })
+  }
   const load = async () => {
-    const authResponse = await fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' })
+    const requestId = ++loadRequestRef.current
+    const previousWorkspaceSlug = workspaceSlugRef.current
+    const [authResponse, modelWorkspaceResponse] = await Promise.all([
+      fetch(`${API}/auth/status`, { credentials: 'include', cache: 'no-store' }),
+      sessionId === undefined
+        ? Promise.resolve(null)
+        : fetch(`/_cangzhi-plugin/workspace?sessionId=${encodeURIComponent(sessionId)}`, { cache: 'no-store' }),
+    ])
     if (!authResponse.ok) throw new Error(await errorMessage(authResponse, '登录状态读取失败'))
     const authValue = await authResponse.json() as AuthState
+    if (requestId !== loadRequestRef.current) return
     setAuth(authValue)
     if (!authValue.authenticated) {
       setWorkspace(null); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null)
       workspaceSlugRef.current = null
       return
     }
+    let modelWorkspaceSlug: string | null = null
+    if (modelWorkspaceResponse !== null && modelWorkspaceResponse.ok) {
+      const value = await modelWorkspaceResponse.json().catch(() => null) as { workspace?: string } | null
+      if (requestId !== loadRequestRef.current) return
+      if (typeof value?.workspace === 'string' && value.workspace.length > 0) modelWorkspaceSlug = value.workspace
+    }
+    if (sessionId !== undefined && modelWorkspaceSlug === null) {
+      setWorkspace(null); setDocuments([]); setResults([])
+      throw new Error('当前对话知识空间读取失败，请重试')
+    }
+    workspaceSlugRef.current = modelWorkspaceSlug
     const [documentsResponse, workspaceResponse] = await Promise.all([
-      fetch(`${API}/documents/overview?limit=60&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
-      fetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
+      workspaceFetch(`${API}/documents/overview?limit=60&offset=0&include_processing=true`, { credentials: 'include', cache: 'no-store' }),
+      workspaceFetch(`${API}/workspaces/current`, { credentials: 'include', cache: 'no-store' }),
     ])
     if (!workspaceResponse.ok || !documentsResponse.ok) throw new Error('当前知识空间读取失败')
     const nextWorkspace = await workspaceResponse.json() as Workspace
-    const workspaceChanged = workspaceSlugRef.current !== null && workspaceSlugRef.current !== nextWorkspace.slug
+    if (requestId !== loadRequestRef.current) return
+    const workspaceChanged = previousWorkspaceSlug !== null && previousWorkspaceSlug !== nextWorkspace.slug
     workspaceSlugRef.current = nextWorkspace.slug
     setWorkspace(nextWorkspace)
     const items = await documentsResponse.json() as DocumentItem[]
+    if (requestId !== loadRequestRef.current) return
     setDocuments(items.map(item => ({ id: item.id, title: item.title, source_type: item.source_type, content_kind: item.content_kind, updated_at: item.updated_at, category: item.primary_category?.name })))
     if (workspaceChanged) {
+      searchRequestRef.current += 1
+      setSubmittedQuery(''); setSearching(false)
       setQuery(''); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setTab('browse')
       setPreviewState('选择资料后可在这里预览原文')
     }
   }
   useEffect(() => {
     if (!state.knowledgeOpen) return
-    const refresh = () => { void load().catch(caught => setNotice(caught instanceof Error ? caught.message : '藏知服务不可用')) }
+    const refresh = (event?: Event) => { if (event) { previewRequests.current.invalidate(); setBusy(false) }; void load().catch(caught => setNotice(caught instanceof Error ? caught.message : '藏知服务不可用')) }
     refresh()
     window.addEventListener('cangzhi-workspace-changed', refresh)
-    return () => window.removeEventListener('cangzhi-workspace-changed', refresh)
-  }, [state.knowledgeOpen])
+    return () => { loadRequestRef.current += 1; searchRequestRef.current += 1; window.removeEventListener('cangzhi-workspace-changed', refresh) }
+  }, [state.knowledgeOpen, sessionId])
   useEffect(() => () => { if (previewUrl) URL.revokeObjectURL(previewUrl) }, [previewUrl])
   useEffect(() => {
     const frame = document.querySelector('[data-shell-overlay]')?.parentElement
@@ -2070,42 +2310,74 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     }
   }, [state.knowledgeOpen, width])
   const search = async (event: React.FormEvent) => {
-    event.preventDefault(); setBusy(true); setNotice('')
-    const response = await fetch(`${API}/search`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: query.trim(), limit: 40, offset: 0 }) })
-    if (!response.ok) { setNotice(await errorMessage(response, '搜索失败')); setBusy(false); return }
-    const body = await response.json() as { hits: SearchHit[] }
-    setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, content_kind: hit.evidence_type === 'dataset' ? 'dataset' : undefined, dataset_id: idNumber(hit.dataset_id) ?? undefined, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
-    setTab('browse')
-    setBusy(false)
+    event.preventDefault()
+    if (!workspace || busy || searching) return
+    const term = query.trim()
+    if (!term) { clearSearch(); return }
+    const requestId = ++searchRequestRef.current
+    setSearching(true); setNotice('')
+    try {
+      const response = await workspaceFetch(`${API}/search`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: term, limit: 40, offset: 0 }) })
+      if (!response.ok) throw new Error(await errorMessage(response, '搜索失败'))
+      const body = await response.json() as { hits: SearchHit[] }
+      if (requestId !== searchRequestRef.current) return
+      setResults(body.hits.map(hit => ({ id: hit.document_id, title: hit.title, source_type: hit.source_type, content_kind: hit.evidence_type === 'dataset' ? 'dataset' : undefined, dataset_id: idNumber(hit.dataset_id) ?? undefined, category: hit.categories?.map(item => item.name).join('、'), snippet: hit.snippet })))
+      setSubmittedQuery(term); setTab('browse')
+    } catch (caught) {
+      if (requestId === searchRequestRef.current) setNotice(caught instanceof Error ? caught.message : '搜索失败，请重试')
+    } finally {
+      if (requestId === searchRequestRef.current) setSearching(false)
+    }
   }
-  const loadDatasetRows = async (datasetId: number, offset: number, limit: number, evidence?: { versionId: number; mode: 'catalog' }): Promise<boolean> => {
+  const clearSearch = () => {
+    searchRequestRef.current += 1
+    setQuery(''); setSubmittedQuery(''); setResults([]); setSearching(false); setNotice('')
+  }
+  const loadDatasetRows = async (datasetId: number, offset: number, limit: number, evidence?: { versionId: number; mode: 'catalog' }, ticket = previewRequests.current.begin()): Promise<boolean> => {
     const requestId = ++tableRequestRef.current
     setBusy(true)
-    const rowsResponse = await fetch(`${API}/datasets/${datasetId}/rows?offset=${offset}&limit=${limit}`, { credentials: 'include', cache: 'no-store' })
+    try {
+    const rowsResponse = await fetchPreview(ticket, `${API}/datasets/${datasetId}/rows?offset=${offset}&limit=${limit}`, { credentials: 'include', cache: 'no-store', signal: ticket.signal })
+    ticket.assertCurrent()
     if (requestId !== tableRequestRef.current) return false
-    if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '数据表行预览暂不可用')); setBusy(false); return false }
+    if (!rowsResponse.ok) throw new Error(await errorMessage(rowsResponse, '数据表行预览暂不可用，请重试'))
     const rows = await rowsResponse.json() as { columns?: string[]; rows?: Array<Record<string, unknown>>; total?: number }
+    ticket.assertCurrent()
+    if (requestId !== tableRequestRef.current) return false
     setPreviewTable({ datasetId, columns: rows.columns ?? [], rows: rows.rows ?? [], total: rows.total ?? rows.rows?.length ?? 0, offset, limit, ...(evidence === undefined ? {} : { evidenceVersionId: evidence.versionId, evidenceMode: evidence.mode }) })
     setPreviewState(''); setBusy(false)
     return true
+    } catch (caught) {
+      if (ticket.isCurrent() && requestId === tableRequestRef.current) setNotice(caught instanceof Error ? caught.message : '表格读取失败，请重试')
+      return false
+    } finally {
+      if (ticket.isCurrent() && requestId === tableRequestRef.current) setBusy(false)
+    }
   }
   const preview = async (item: WorkbenchDocument) => {
+    const ticket = previewRequests.current.begin()
+    setNotice('')
+    try {
     tableRequestRef.current += 1
     setSelected(item); setTab('preview'); setPreviewState('正在生成预览…'); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
     const initialKind = classifyDocumentPreview({ contentKind: item.content_kind, sourceType: item.source_type, documentType: item.document_type, title: item.title })
     if (initialKind === 'dataset' || item.dataset_id !== undefined) {
-      const datasetsResponse = await fetch(`${API}/datasets?document_id=${item.id}`, { credentials: 'include', cache: 'no-store' })
-      if (!datasetsResponse.ok) { setPreviewState(await errorMessage(datasetsResponse, '数据表尚未完成解析，暂时无法预览')); setBusy(false); return }
+      const datasetsResponse = await fetchPreview(ticket, `${API}/datasets?document_id=${item.id}`, { credentials: 'include', cache: 'no-store', signal: ticket.signal })
+    ticket.assertCurrent()
+      if (!datasetsResponse.ok) throw new Error(await errorMessage(datasetsResponse, '数据表尚未完成解析，暂时无法预览'))
       const datasets = await datasetsResponse.json() as Array<{ id: number; name: string; sheet_name: string }>
+    ticket.assertCurrent()
       const dataset = item.dataset_id === undefined ? datasets[0] : datasets.find(candidate => candidate.id === item.dataset_id)
       if (dataset === undefined) { setPreviewState('数据表尚未生成可预览的数据集'); setBusy(false); return }
-      await loadDatasetRows(dataset.id, 0, PREVIEW_PAGE_SIZE)
+      await loadDatasetRows(dataset.id, 0, PREVIEW_PAGE_SIZE, undefined, ticket)
       return
     }
-    const detailResponse = await fetch(`${API}/documents/${item.id}`, { credentials: 'include', cache: 'no-store' })
+    const detailResponse = await fetchPreview(ticket, `${API}/documents/${item.id}`, { credentials: 'include', cache: 'no-store', signal: ticket.signal })
+    ticket.assertCurrent()
     if (detailResponse.ok) {
       const detail = await detailResponse.json() as { current_version?: { raw_content?: string | null; structured_content?: { document_type?: string } | null } }
+    ticket.assertCurrent()
       const raw = detail.current_version?.raw_content
       const documentType = detail.current_version?.structured_content?.document_type
       const resolved = { ...item, ...(typeof documentType === 'string' ? { document_type: documentType } : {}) }
@@ -2115,10 +2387,17 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
         setPreviewText(raw); setPreviewState(''); setBusy(false); return
       }
     }
-    const response = await fetch(`${API}/documents/${item.id}/preview`, { credentials: 'include', cache: 'no-store' })
-    if (!response.ok) { setPreviewState(await errorMessage(response, '这份资料暂时没有可用预览')); setBusy(false); return }
+    const response = await fetchPreview(ticket, `${API}/documents/${item.id}/preview`, { credentials: 'include', cache: 'no-store', signal: ticket.signal })
+    ticket.assertCurrent()
+    if (!response.ok) throw new Error(await errorMessage(response, '这份资料暂时没有可用预览'))
     const blob = await response.blob()
+    ticket.assertCurrent()
     setPreviewUrl(URL.createObjectURL(blob)); setPreviewState(''); setBusy(false)
+    } catch (caught) {
+      if (!ticket.isCurrent()) return
+      setPreviewState('预览加载失败，请重新选择资料重试。')
+      setNotice(caught instanceof Error ? caught.message : '预览加载失败')
+    } finally { if (ticket.isCurrent()) setBusy(false) }
   }
   const changeTablePage = (offset: number, limit = previewTable?.limit ?? PREVIEW_PAGE_SIZE) => {
     if (previewTable === null || offset < 0 || offset >= previewTable.total || busy) return
@@ -2128,14 +2407,17 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     void loadDatasetRows(previewTable.datasetId, offset, limit, evidence)
   }
   const previewEvidence = async (evidence: EvidenceLink) => {
-    if (evidence.documentVersionId === null) {
-      setPreviewState('这条历史证据缺少 document_version_id，无法安全地用当前最新版替代。')
-      return
-    }
+    const ticket = previewRequests.current.begin()
+    setNotice('此证据未记录知识空间身份；仅在当前对话空间核验原始版本，不会自动切换或搜索其他空间。')
+    try {
     tableRequestRef.current += 1
     setSelected({ id: evidence.documentId, title: evidence.title, source_type: 'file', ...(evidence.datasetId === null ? {} : { content_kind: 'dataset', dataset_id: evidence.datasetId }) })
     setTab('preview'); setPreviewState('正在读取回答时使用的原始证据…'); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null); setBusy(true)
     if (previewUrl) { URL.revokeObjectURL(previewUrl); setPreviewUrl('') }
+    if (evidence.documentVersionId === null) {
+      setPreviewState('这条历史证据缺少版本信息，无法安全地用当前最新版替代。')
+      return
+    }
     const version = `document_version_id=${evidence.documentVersionId}`
     const artifact = evidence.artifactVersion === null ? '' : `&artifact_version=${evidence.artifactVersion}`
     const endpoint = evidence.datasetId !== null
@@ -2144,30 +2426,38 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
         ? `${API}/v1/knowledge/evidence/by-chunk/${evidence.chunkId}?${version}`
         : null
     if (endpoint === null) { setPreviewState('这条记录没有可定位的片段或数据集。'); setBusy(false); return }
-    const response = await fetch(endpoint, { credentials: 'include', cache: 'no-store' })
-    if (!response.ok) { setPreviewState(await errorMessage(response, '原始证据读取失败')); setBusy(false); return }
+    const response = await fetchPreview(ticket, endpoint, { credentials: 'include', cache: 'no-store', signal: ticket.signal })
+    ticket.assertCurrent()
+    if (!response.ok) throw new Error(await errorMessage(response, '原始证据读取失败'))
     const context = await response.json() as EvidenceContextPayload
+    ticket.assertCurrent()
     setEvidenceContext(context)
     if (evidence.datasetId !== null && evidence.sourceRows.length > 0) {
-      const rowsResponse = await fetch(`${API}/v1/knowledge/evidence/by-dataset/${evidence.datasetId}/rows?${version}${artifact}`, {
-        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      const rowsResponse = await fetchPreview(ticket, `${API}/v1/knowledge/evidence/by-dataset/${evidence.datasetId}/rows?${version}${artifact}`, {
+        signal: ticket.signal, method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ source_rows: evidence.sourceRows, columns: evidence.columns, limit: Math.min(200, Math.max(20, evidence.sourceRows.length)) }),
       })
-      if (!rowsResponse.ok) { setPreviewState(await errorMessage(rowsResponse, '贡献原始行读取失败')); setBusy(false); return }
-      setEvidenceRows(await rowsResponse.json() as EvidenceRowsPayload)
+      if (!rowsResponse.ok) throw new Error(await errorMessage(rowsResponse, '贡献原始行读取失败，请重新点击来源重试'))
+      const rows = await rowsResponse.json() as EvidenceRowsPayload
+      ticket.assertCurrent()
+      setEvidenceRows(rows)
     } else if (classifyEvidencePreview(context, null) === 'dataset') {
       const datasetId = resolveEvidenceDatasetId(context, evidence.datasetId)
       if (datasetId === null) {
-        setPreviewState('数据集身份缺失或与证据不一致，不能用其他数据表代替。')
-        setBusy(false)
-        return
+        throw new Error('数据集身份缺失或与证据不一致，不能用其他数据表代替。')
       }
       setSelected({ id: evidence.documentId, title: evidence.title, source_type: 'file', content_kind: 'dataset', dataset_id: datasetId, document_type: context.document_type })
-      const loaded = await loadDatasetRows(datasetId, 0, PREVIEW_PAGE_SIZE, { versionId: evidence.documentVersionId, mode: 'catalog' })
+      const loaded = await loadDatasetRows(datasetId, 0, PREVIEW_PAGE_SIZE, { versionId: evidence.documentVersionId, mode: 'catalog' }, ticket)
+      ticket.assertCurrent()
       if (loaded) setEvidenceContext(null)
       return
     }
     setPreviewState(''); setBusy(false)
+    } catch (caught) {
+      if (!ticket.isCurrent()) return
+      setNotice(caught instanceof Error ? caught.message : '原始证据加载失败，请重新点击来源重试')
+      setPreviewState('原始证据加载失败，请重新点击来源重试。')
+    } finally { if (ticket.isCurrent()) setBusy(false) }
   }
   useEffect(() => {
     const open = (event: Event) => {
@@ -2197,24 +2487,37 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
   }, [openKnowledge, previewUrl])
   const useDocument = (item: WorkbenchDocument) => {
     setPinned(items => items.some(document => document.id === item.id) ? items : [...items, item])
-    window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: `请重点读取并基于藏知资料《${item.title}》（document_id: ${item.id}）回答：\n\n` } }))
-    setNotice(`已将《${item.title}》加入当前对话，问题草稿已经准备好`)
+    window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { sessionId, prompt: `请重点读取并基于藏知资料《${item.title}》（document_id: ${item.id}）回答：\n\n` } }))
   }
   const upload = async (files: FileList | null) => {
     if (!files?.length) return
     setBusy(true); setNotice('')
+    try {
     for (const [index, file] of Array.from(files).entries()) {
       setNotice(`正在上传 ${index + 1}/${files.length}：${file.name}`)
       const body = new FormData(); body.append('file', file); body.append('title', '')
-      const response = await fetch(`${API}/files/upload`, { method: 'POST', credentials: 'include', body })
-      if (!response.ok) { setNotice(await errorMessage(response, `${file.name} 上传失败`)); setBusy(false); return }
+      const response = await workspaceFetch(`${API}/files/upload`, { method: 'POST', credentials: 'include', body })
+      if (!response.ok) throw new Error(await errorMessage(response, `${file.name} 上传失败（此前成功上传的文件已保留）`))
     }
-    setNotice('上传完成，资料正在处理'); setBusy(false); await load()
-    if (uploadInput.current) uploadInput.current.value = ''
+    setNotice('上传完成，资料正在处理'); await load()
+    } catch (caught) {
+      setNotice(caught instanceof Error ? caught.message : '上传失败，请重试；此前成功上传的文件已保留')
+    } finally {
+      setBusy(false)
+      if (uploadInput.current) uploadInput.current.value = ''
+    }
   }
   const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId)
     resizeStart.current = { x: event.clientX, width }
+  }
+  const resizeWithKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const next = resizeWorkbenchWithKey(width, event.key)
+    if (next === null) return
+    event.preventDefault()
+    widthRef.current = next
+    setWidth(next)
+    try { window.localStorage.setItem('cangzhi-workbench-width', String(next)) } catch { /* optional preference */ }
   }
   const resize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (!event.currentTarget.hasPointerCapture(event.pointerId)) return
@@ -2231,18 +2534,18 @@ function KnowledgeWorkbench({ useCangzhiConsole, openKnowledge, closeKnowledge, 
     } catch { /* storage may be unavailable */ }
   }
   if (!state.knowledgeOpen) return null
-  const visible = results.length > 0 || query.trim() ? results : documents
+  const visible = submittedQuery ? results : documents
   return <aside className={css.knowledgeWorkbench} aria-label="藏知工作台" style={{ width }}>
-    <div className={css.workbenchResize} role="separator" aria-orientation="vertical" aria-label="调整藏知工作台宽度" aria-valuemin={WORKBENCH_SIZE_MIN} aria-valuemax={WORKBENCH_SIZE_MAX} aria-valuenow={width} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize}/>
+    <div className={css.workbenchResize} role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整藏知工作台宽度：左键加宽，右键收窄，Home 最窄，End 最宽" aria-valuemin={WORKBENCH_SIZE_MIN} aria-valuemax={WORKBENCH_SIZE_MAX} aria-valuenow={width} onKeyDown={resizeWithKeyboard} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize}/>
     <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div><button title="知识库管理" onClick={openConsole}>⚙</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>当前对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button></nav>
     {auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>登录后浏览知识资料</h3><p>登录管理账户后，可以在对话旁搜索、预览和上传资料。</p><button onClick={openConsole}>前往登录</button></div> : <>
-      {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} onChange={event => { setQuery(event.target.value); if (!event.target.value.trim()) setResults([]) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy}>{busy ? '搜索中…' : '搜索'}</button></form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy}>＋</button></div><div className={css.drawerSectionTitle}><strong>{results.length > 0 || query.trim() ? '搜索结果' : '最近资料'}</strong><span>{visible.length} 项</span></div><div className={css.workbenchResults}>{visible.length === 0 ? <div className={css.drawerEmpty}>没有找到匹配的资料</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
-      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '已加入对话' : '加入对话'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <div className={css.exactEvidencePreview}>{classifyDocumentPreview({ contentKind: selected?.content_kind, sourceType: selected?.source_type, documentType: selected?.document_type, title: selected?.title }) === 'markdown' ? <WorkbenchMarkdownPreview markdown={previewText}/> : <pre className={css.markdownPreview}>{previewText}</pre>}</div> : previewTable ? <div className={css.tablePreview}><p>{previewTable.evidenceMode === 'catalog' && previewTable.evidenceVersionId !== undefined ? `版本绑定目录数据集 · version ${previewTable.evidenceVersionId} · ` : ''}共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
-      {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>当前对话知识</strong><small>模型使用“{workspace?.name ?? '当前空间'}”，你还可以固定重点资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未固定资料。到“资料”中搜索并预览，然后点击“加入对话”。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请综合当前对话中固定的藏知资料，归纳共同结论、分歧与依据，并逐条标注来源。\n\n' } }))}>综合固定资料</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
+      {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} aria-label="搜索当前空间资料" onChange={event => { if (!event.target.value.trim()) clearSearch(); else setQuery(event.target.value) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy || searching || !workspace}>{searching ? '搜索中…' : '搜索'}</button>{(query || submittedQuery) && <button type="button" onClick={clearSearch} aria-label="清除搜索，返回最近资料">清除</button>}</form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy || !workspace}>＋</button></div><div className={css.drawerSectionTitle}><strong>{submittedQuery ? `“${submittedQuery}”的搜索结果` : '最近资料'}</strong><span role="status">{searching ? '搜索中，暂保留原列表…' : `${visible.length} 项`}</span></div><div className={css.workbenchResults} aria-busy={searching}>{visible.length === 0 ? <div className={css.drawerEmpty}>{submittedQuery ? '没有找到匹配资料，请尝试更短的关键词或清除搜索。' : '当前空间暂无资料，可以上传文件或前往知识库管理。'}</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
+      {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '再次准备提问' : '准备提问'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <div className={css.exactEvidencePreview}>{classifyDocumentPreview({ contentKind: selected?.content_kind, sourceType: selected?.source_type, documentType: selected?.document_type, title: selected?.title }) === 'markdown' ? <WorkbenchMarkdownPreview markdown={previewText}/> : <pre className={css.markdownPreview}>{previewText}</pre>}</div> : previewTable ? <div className={css.tablePreview}><p>{previewTable.evidenceMode === 'catalog' && previewTable.evidenceVersionId !== undefined ? `版本绑定目录数据集 · version ${previewTable.evidenceVersionId} · ` : ''}共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}
+      {tab === 'context' && <section className={css.contextPane}><div className={css.contextHero}><CangzhiMark size={34}/><div><strong>提问参考资料</strong><small>{knowledgeSession.policy === 'off' ? '本对话藏知已关闭；浏览资料不会自动开启检索。' : `当前空间：${workspace?.name ?? '读取中'}。`} 此列表仅为本次打开对话时的临时记录，不代表模型已读取资料。</small></div></div>{pinned.length === 0 ? <div className={css.contextEmpty}>尚未准备参考资料。预览资料后点击“准备提问”，检查输入框并发送后才会交给模型。</div> : <div className={css.contextList}>{pinned.map(item => <article key={item.id}><span>▤</span><div><strong>{item.title}</strong><small>document_id: {item.id}</small></div><button onClick={() => setPinned(items => items.filter(document => document.id !== item.id))}>移除</button></article>)}</div>}<div className={css.contextTips}><strong>建议问法</strong><button disabled={pinned.length === 0} onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { sessionId, prompt: `请综合以下藏知资料，归纳共同结论、分歧与依据，并逐条标注来源：${pinned.map(item => `《${item.title}》（document_id: ${item.id}）`).join('、')}。\n\n` } }))}>准备综合提问</button><button onClick={() => window.dispatchEvent(new CustomEvent('cangzhi-use-document', { detail: { sessionId, prompt: '请核对当前问题与藏知资料中的原文，指出能够确认的事实、仍有疑问的部分，并标注来源。\n\n' } }))}>核对事实依据</button></div></section>}
     </>}
-    {notice && <p className={css.workbenchNotice}>{notice}</p>}
-    <footer className={css.workbenchStatus}><span data-ok={String(auth?.authenticated ?? false)}/><strong>{auth?.authenticated ? '知识服务在线' : '等待登录'}</strong><small>{busy ? '正在处理…' : `${documents.length} 份资料 · ${pinned.length} 份已加入对话`}</small></footer>
+    {notice && <p className={css.workbenchNotice} role="status" aria-live="polite">{notice}</p>}
+    <footer className={css.workbenchStatus}><span data-ok={String(Boolean(auth?.authenticated && workspace))}/><strong>{auth?.authenticated ? workspace ? '空间已连接' : '空间未就绪' : '等待登录'}</strong><small>{busy || searching ? '正在处理…' : `${documents.length} 份资料 · ${pinned.length} 份提问参考`}</small></footer>
   </aside>
 }
 

@@ -332,3 +332,82 @@
   - `MarkdownText` 自带 `var(--dsw-alias-*)` / `var(--ds-font-family-code)` token，工作台主题已使用同套 token；但如果 DSH 主题切换为高对比 / 暗色以外的非常规变体，仍以原值渲染；本轮不做主题适配。
   - 工作台只对 `context.context_markdown` 走 MarkdownText；旧的 `<pre>` “原文”入口与数据表行预览路径保留，纯渲染辅助逻辑外的样式与交互一律不动。
   - 旧 3080 端口上的 DSH 进程（用户当前使用）未重启；本次构建已落到 `lib/client.js`，用户下次重启 DSH 即可生效。
+
+## 2026-09-07：会话级藏知知识空间隔离与状态持久化（ADR-009）
+
+- **问题**：知识空间仍由进程级 `activeWorkspaceSlug` 共享，DSH 内所有对话的 `mcp__cangzhi__*` 调用携带同一 `x-cangzhi-workspace`；并发 A/B 无法各自检索，刷新/恢复/Host 重启后空间与能力开关不保持。通用 DSH MCP bridge 把 transport 绑定到单一 URL + 静态 header，无法把「正在执行的会话」传到每次 `tools/call`（已确认 cangzhi `api/mcp.py` 为 Stateless Streamable HTTP adapter，`tools/call` 无需 `initialize`）。
+- **实现**（Ark）：
+  - 新增纯决策层 `src/host/session-state.mjs`：`resolveWorkspace` / `resolvePolicy` 沿 `session.header.parentSession` 链取最近显式 pin，无 pin 时回落进程默认并标 `bound:false`（降级）；`serializeState` / `deserializeState` 提供无损往返。
+  - 新增 `src/host/domain-store.mjs`（纯 `KvTable` 适配，每次 `put` 耐久后返回）+ `src/host/storage-open.mjs`（`cangzhi_session` domain，`per-record`，表 `workspaces`/`policies`，基于 `@deepseek-ai/dsh-storage-domain` + `zod`）。`ctx.get('storage')` 不可用时降级进程内存并告警，不使用 localStorage 做安全边界。
+  - 新增 `src/host/session-manager.mjs`：在每个 live agent 作用域注册 `mcp__cangzhi__*` scoped 覆盖（shadow 全局 bridge 工具），`execute` 按 `exec.agent.id` 在**执行时刻**解析工作空间，经插件回环代理发送 `tools/call` 并显式携带 `x-cangzhi-workspace`；读不到执行会话时抛「无法确定执行会话」，绝不回落进程级空间。`tools/change` 签名比对处理 `cangzhi-mcp` 注册/重连与 agent 先创建的竞态（dispose + 重注册指向最新全局 schema）。
+  - `src/host/mcp-call.mjs`：一次 `tools/call` 的 JSON-RPC（含 `application/json` + SSE 响应解析、`isError` 抛错、`exec.signal` 取消透传、`Mcp-Session-Id` 按工作空间缓存），fetch 可注入。
+  - `src/index.ts`：统一 session manager 接线（`agent/created`/`agent/disposed`/`tools/change`）、持久 store 打开、`mcpProxy` 尊重入站 `x-cangzhi-workspace`（无则回退进程默认）、控制端点改为显式携带 `sessionId`（`GET/POST /workspace`、`GET/POST /session-policy`、新增 `GET /session-state`；未带 sessionId 的 workspace 查询/改动返回 400，仅 `processDefault:true` 接受进程级变更）。
+  - 客户端 `src/client/plugin.tsx`：`syncModelWorkspace(slug, sessionId)` 仅在持有会话时 POST；管理中心（无会话绑定）不再写任何模型工作空间；Popover 增加未隔离降级提示 `popoverScopeDegraded`。
+- **验证**：
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness` tsdown 构建通过（`lib/index.js` 71.46 kB、`lib/client.js` 283.23 kB）；`node scripts/rewrite-client-id.mjs` 通过；`npm run check`（`node --check lib/index.js && node --check lib/client.js`）通过。
+  - 新增 `tests/session-state.test.mjs`（10 项：隔离/继承/降级/序列化往返/domain-store 耐久/SSE）与 `tests/session-manager.test.mjs`（1 组 DSH 耦合：A/B 并发隔离、父子继承与隔离、策略开关、无会话拒绝、bridge 注册竞态）；`node --test tests/*.test.mjs` 全部 91 项通过。
+  - `package.json` 新增 peerDependencies `@deepseek-ai/dsh-storage`:0.1.2-alpha.2、`@deepseek-ai/dsh-storage-domain`:0.1.2-alpha.2、`zod:^4.4.3`（含 optional 元数据）。
+- **风险 / 待验**：未在真实运行 DSH 上做端到端并发浏览器验收（既存 3080 DSH 未重启）；scoped override 的 `tools/call` 经回环代理转发依赖 cangzhi `/api/mcp` 的 Stateless 行为，未做真实 `knowledge_ask` SSE 进度流验证；`storage-domain`/`zod` 为外部 peer import，需安装环境可解析（base Profile 已提供）。
+
+## 2026-09-07（晚）：MiniMax M3 第二轮复核与修复
+
+- **复核输入**：经理用 `NODE_PATH` 跑 `import('/data/share/dsh-cangzhi/lib/index.js')` 复现 `ERR_MODULE_NOT_FOUND`，确认 Ark 第一轮的 `lib/index.js` 顶部残留了 `import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'` 和 `import { z } from 'zod'`，本插件通过 `file:` 挂载到 DSH 时，DSH 的 `node_modules/.pnpm` 不会被 symlink 进来，加载即崩。
+- **修复**：
+  - **`src/host/storage-open.mjs` 改写为完全自给**：内联 `defineDomain`（与 DSH 端同 `UNIT_NAME_RE = /^[a-z][a-z0-9_]*$/`、同 `Number.isInteger(version) >= 0`、同 `layout` 校验、同 `tables.*` 校验、同 `global.schema.safeParse(null)` 防护）、`domainTable`（返回 `{ valueSchema }`，要求 `schema.parse` 存在）、迷你 `z`（`z.string()` / `z.enum([...])`，都有 `safeParse` / `parse`，`parse` 抛错）。域与表 schema 的运行时形状与 DSH `defineDomain` 一致，DSH 端 `domain.open(spec)` 用 `valueSchema.parse(raw)` 校验已存记录时能直接复用。
+  - **`src/host/mcp-call.mjs` 补 120_000ms 默认 timeout**：`composeSignal` 把 caller signal 与 `setTimeout` 墙钟绑定到同一个 `AbortController`，任一端 `abort` 即取消 fetch 并 `clearTimeout`，避免计时器泄露；`exec.signal` 仍优先（model 取消立即生效）。4xx/5xx 立即 `sessionIds.delete(workspace)` 丢弃过期的 `Mcp-Session-Id`；401/403 单独抛认证错误；JSON 与 SSE 双路、`isError` 抛错、`structuredContent` 透传行为保持。
+  - **入站 `x-cangzhi-workspace` 信任边界**：回环代理的 `headers` 回调对入站 header 做 slug 正则校验，畸形值直接抛错（不会把控制字符或 64 字节之外的值传给上游）；未带 header 的回退到 `activeWorkspaceSlug` 仍然保留给进程级 `cangzhi-mcp` bridge。
+  - **客户端 Popover / Dock / 会话头**：
+    - `HomeIntegration.load(sessionId)` 与 `KnowledgeDock.load(sessionId)` 改为先 GET `/_cangzhi-plugin/workspace?sessionId=...`，得到 `{ workspace, bound }`：若 `bound=true`，直接以 Host 的 slug 作为 UI 展示与后续 `syncModelWorkspace` 来源；若 `bound=false`，才回退到 `/workspaces/current` (cangzhi cookie) 并主动 `syncModelWorkspace` 写入 pin；`useEffect` 依赖补齐 `sessionId`，切会话立刻重载；`switchWorkspace` 改为先 `syncModelWorkspace` 成功后再写 cangzhi cookie，避免 cookie 与模型状态在错误路径上分叉。
+    - `ConversationKnowledgeHeader` `useEffect` 依赖补齐 `sessionId` 并把 `workspaces/current` 改成只读回退，主路径是 Host 的 `model workspace`，并用 `workspaces` 列表解析出人类可读的名字。
+  - **`src/host/session-manager.mjs`**：`onAgentCreated` 主动取一次 `cangzhiSignature()` 并在签名变化时更新 `lastSignature`，避免 manager 订阅 `tools/change` 之前 bridge 已注册的竞态；`syncSession` 中 `on→on` 的同策略路径在 `overridesActive=false` 时也重新 `registerOverrides`，确保 bridge 在 manager 之后注册时第一次 `onAgentCreated` 就把工具接上。
+  - **`src/index.ts`**：plugin `apply` 末尾对 `ctx.agents.list()` 遍历 `onAgentCreated` 一次，再强制 `manager.onToolsChange()` 一次，桥在 plugin 加载前就绪的场景不再被静默错过；`openPersistentStore` 在 `ctx.get('storage')` 拿到后校验 `domain.open` 返回值具有 `table/close` 表面，避免把"返回非 Domain"当作成功并把后续 `setWorkspace/put` 默默吞到原生对象上。
+  - **`package.json`**：移除 `@deepseek-ai/dsh-storage-domain` 和 `zod` 的 peerDependency；`@deepseek-ai/dsh-storage` 仍保留（`ctx.storage` hub 由 DSH 注入）。
+- **测试**：
+  - **`tests/session-manager.test.mjs` 升级为真正走 DSH `ctx.tools.execute` 管线**：之前是 `def.execute({}, { agent, signal })` 直调，本轮改成 `ctx.tools.execute({ signal, callId, name, arguments, agent })`，覆盖模型调用 cangzhi 工具的真实路径（含参数快照、scope 解析、output schema 校验、post-execute pipeline）；并新增并发 `Promise.all` 验证 A/B 各自 `x-cangzhi-workspace` 并发落到 wire。
+  - 新增 4 项独立测试：
+    - `mcp-call — 120s default timeout aborts long fetches when no signal is supplied`：覆盖 `DEFAULT_MCP_TIMEOUT_MS === 120_000` 与实际 fetch 在无 caller signal 时被墙钟取消。
+    - `mcp-call — caller signal wins over wall-clock bound`：覆盖 caller signal 优先于墙钟。
+    - `mcp-call — SSE response carries workspace and parses chunked events`：用真实 `text/event-stream` 多事件 payload 验证工作空间 header 透传。
+    - `mcp-call — 4xx invalidates the cached Mcp-Session-Id`：验证 401 之后下一次调用不再带过期 id。
+    - 桥重连 race 升级：原本仅"manager→bridge"方向的同步，本轮加 dispose 旧 globals + registerGlobals + `onToolsChange` 验证"桥消失→0 覆盖→桥回来重新覆盖"全链路。
+- **验证命令与结果**：
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness /home/percy/software/deepseek-harness/node_modules/.bin/tsdown --config tsdown.config.ts` 通过（`lib/index.js` 80.12 kB / gzip 21.91 kB；`lib/client.js` 287.97 kB / gzip 56.16 kB）。
+  - `node scripts/rewrite-client-id.mjs` 通过；`node --check lib/index.js && node --check lib/client.js` 通过。
+  - `node -e "import('/data/share/dsh-cangzhi/lib/index.js').then(m => console.log(Object.keys(m)))"` 复现经理的失败路径，**本轮输出** `IMPORT OK [ 'apply', 'inject', 'name' ]`，不再 `ERR_MODULE_NOT_FOUND`。
+  - `DSH_SOURCE=/home/percy/software/deepseek-harness node --test tests/*.test.mjs`：**95 项全部通过**（含 `session-state` 10 / `session-manager` 5 / `session-policy` 1 / `markdown-preview` / `preview-routing` / `refresh-policy` / `workbench-and-evidence`）。
+  - `git diff --check` 无冲突标记。
+- **仍未做、需在真实 DSH 上复测**：3080 上的运行中 DSH 仍未使用本轮 bundle，真实浏览器并发 A/B、`刷新/恢复`、Host 重启后的会话级隔离仍需在 DSH 重启后复测；scoped override 的 `tools/call` 经回环代理的真实 `knowledge_ask` SSE 进度流尚无现场观察。
+
+## 2026-09-07：Codex 集成修正与 Host 实机验证
+
+- 补 Host tools 注入声明；全局工具限制在开启会话也保留，覆盖注册异常时回滚部分注册；重连比较定义身份。补正确 MCP 协议头，并将超时延长至响应正文消费结束。
+- 修正 HomeIntegration 对 InjectFace 的属性读取；刷新时读取 Host 策略；加载页面不再自动用 Cookie 写入空间 pin。工作台请求显式携带 Host 空间，读取失败时报告错误。
+- 96 项测试、DSH preset 构建、语法检查、独立 Host 导入通过。版本提升为 0.11.0，安装到 web Profile。安装曾遇 pnpm v10/v11 store 冲突，使用现有 pnpm 11.7.0 完成重装并校验产物一致。
+- 临时 3090/3091 Host 启动成功，状态返回 persistence=domain；测试键 acceptance-session 写入 off 后重启成功读回。该专用测试键留存在 domain 中，不对应用户真实会话。
+- 浏览器自动化导航未取得有效 DOM，浏览器加载、A/B 并发及证据点击仍待验收；不能将 Host 启动成功等同于浏览器插件加载成功。本轮临时服务在检查结束后关闭。
+
+## 2026-09-07：最终构建同步与切会话收尾
+
+- 工作台按 sessionId 重建，清空上一会话的临时选择、搜索和预览状态；Host 返回的空间不在列表中时显示 slug，不再借用 Cookie 空间的名称。
+- 修复新 Agent 创建消耗工具签名却未同步已有会话的竞态，并在真实 DSH 工具运行时回归测试中覆盖该顺序。
+- 96 项测试全部通过（无跳过），构建、语法和 diff 检查通过。使用现有 pnpm 11.7.0 重新安装 web Profile，前后端产物 SHA-256 与仓库完全一致。
+- 浏览器 A/B 会话与证据预览的交互验收仍未完成，不将上述代码测试作为浏览器验收结果。
+- 确认默认端口无人占用后，用开发启动脚本启动 3080/3081；HTTP 3080 返回预期未登录 401，服务保留运行供页面验证。
+
+## 2026-09-07：0.11.1 工作台可读性与反馈
+
+- 按用户要求继续通过 OpenCode CLI 协作：newapi/ark-code-latest 负责限定 CSS 修改（第一次只读退出，第二次完成），newapi/minimax-m3 只读复核，Codex 集成。未覆盖此前未提交改动。
+- 工作台主要文字提升到 13px、辅助文字到 12px；分页换行、焦点提示、方向键/Home/End 调宽。保持用户确认的单一拖拽布局。
+- 搜索草稿与已完成查询分离，输入不隐藏资料；明确搜索中保留旧列表，清除后返回资料；重复提交拦截、请求序号忽略过期结果。补搜索/上传/预览网络异常收尾及可读反馈。
+- “加入对话”改为“准备提问”，明确需要检查草稿并发送；临时参考列表不代表模型已读取，关闭藏知时提示不会自动开启，综合草稿携带所选文档身份。新增 ADR-010。
+- MiniMax 的重复提交和可见焦点建议已采纳；保留与右侧面板拖动方向一致的左键加宽，补明确辅助标签；不采纳提前给旧结果换新查询标题的建议，改用搜索中说明。
+- 99 项测试（新增 3 项键盘边界测试）、DSH preset 构建、产物语法检查、git diff --check 全部通过。未完成浏览器交互验收，不能据此声称视觉或端到端验证通过。
+- 0.11.1 已安装 web Profile，client.js SHA-256 与仓库一致；确认并停止上一轮本任务启动的 DSH 后重新启动 3080/3081，HTTP 返回预期未登录 401。
+
+## 2026-09-07：0.11.2 预览生命周期与草稿保护
+
+- OpenCode newapi/ark-code-latest 新增 latest-request 模块与 7 项测试；经理集成到文档、证据、分页请求，读取正文后检查身份，旧错误/finally 不更新新请求。首次打开面板不取消同次证据点击，关闭/卸载/空间变化取消请求。
+- 预览链首次从 Host 确认空间，后续共享空间快照；新预览重新确认，不以 Cookie 回退。
+- 从本地 DSH contract 确认 useInput 与 inputActions.setDraft 的语义。新增 draft-prompt 与 3 项测试，保留原文字、避免重复追加；带引用 occurrence 或非 plain 阶段拒绝重写。草稿事件与反馈绑定 sessionId。
+- 历史 EvidenceLink 无可信空间身份，提示仅在当前空间核验版本；后续可信空间元数据迁移仍未实施。新增 ADR-011 记录兼容边界。
+- 109 项测试（无跳过）、DSH preset 构建及产物语法检查通过；未完成浏览器交互验收。MiniMax M3 只读复核已发起，结果另行记录，不预先声明通过。

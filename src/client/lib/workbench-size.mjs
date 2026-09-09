@@ -39,6 +39,14 @@ export function clampWorkbenchWidth(value) {
   return Math.min(WORKBENCH_SIZE_MAX, Math.max(WORKBENCH_SIZE_MIN, Math.round(value)))
 }
 
+export function resizeWorkbenchWithKey(width, key) {
+  if (key === 'Home') return WORKBENCH_SIZE_MIN
+  if (key === 'End') return WORKBENCH_SIZE_MAX
+  if (key === 'ArrowLeft') return clampWorkbenchWidth(width + 20)
+  if (key === 'ArrowRight') return clampWorkbenchWidth(width - 20)
+  return null
+}
+
 export function detectWorkbenchSize(width) {
   const clamped = clampWorkbenchWidth(width)
   if (clamped <= (WORKBENCH_SIZE_TABLE.narrow + WORKBENCH_SIZE_TABLE.standard) / 2) return 'narrow'

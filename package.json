@@ -1,6 +1,6 @@
 {
   "name": "dsh-cangzhi",
-  "version": "0.10.0",
+  "version": "0.11.2",
   "description": "Standalone DeepSeek Harness adapter for Cangzhi knowledge services",
   "type": "module",
   "main": "lib/index.js",
@@ -58,10 +58,12 @@
     "@deepseek-ai/dsh-client-ui-slots": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-ui-tool": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-system-prompt": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.2",
     "@deepseek-ai/dsh-host-webserver": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-client-connection": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-credentials": "0.1.2-alpha.1",
     "@deepseek-ai/dsh-settings": "0.1.2-alpha.1",
+    "@deepseek-ai/dsh-storage": "0.1.2-alpha.2",
     "react": "^18.2.0"
   },
   "peerDependenciesMeta": {
@@ -78,10 +80,12 @@
     "@deepseek-ai/dsh-client-ui-slots": { "optional": true },
     "@deepseek-ai/dsh-client-ui-tool": { "optional": true },
     "@deepseek-ai/dsh-system-prompt": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
     "@deepseek-ai/dsh-host-webserver": { "optional": true },
     "@deepseek-ai/dsh-client-connection": { "optional": true },
     "@deepseek-ai/dsh-credentials": { "optional": true },
     "@deepseek-ai/dsh-settings": { "optional": true },
+    "@deepseek-ai/dsh-storage": { "optional": true },
     "react": { "optional": true }
   },
   "license": "MIT"
