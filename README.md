@@ -94,6 +94,8 @@ export CANGZHI_WORKSPACE=default
 
 `CANGZHI_DSH_MCP_PORT` 始终是部署参数，不出现在设置页。不要把藏知 PAT 写入环境变量或 `settings.yaml`，也不要让 DSH MCP 客户端绕过适配器直连藏知。首次在 DSH 页面执行“登录并连接”后，适配器会创建只读/检索权限 PAT，并存入 DSH 的 `CANGZHI_TOKEN` 凭据项。
 
+管理员登录可选“记住此浏览器”（闲置 7 天失效、最长 30 天），未勾选保持藏知默认的 12 小时会话。此设置由藏知 API 维护，不会把管理员密码或登录会话保存到 DSH credentials。工作台重新登录时会验证已有 `CANGZHI_TOKEN`，有效则直接复用。
+
 ## 本地源码开发
 
 构建当前插件仍复用 DSH 的浏览器打包 preset，因此需要 `DSH_SOURCE`，但不依赖藏知仓库路径：

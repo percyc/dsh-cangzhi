@@ -92,6 +92,8 @@ export CANGZHI_WORKSPACE=default
 
 `CANGZHI_DSH_MCP_PORT` is always a deployment parameter and is not exposed in the settings UI. Do not put the Cangzhi PAT in environment variables or `settings.yaml`, and do not configure the DSH MCP client to bypass the adapter. On the first **Sign in and connect** action in DSH, the adapter creates a read-only/retrieval PAT and stores it in the DSH `CANGZHI_TOKEN` credential entry.
 
+Administrator sign-in offers an optional **Remember this browser** choice (seven idle days, 30-day maximum). Leaving it unchecked retains Cangzhi's default 12-hour session. Cangzhi's API owns that browser session; the adapter does not store an administrator password or session in DSH credentials. On later sign-ins, the workbench validates and reuses an existing `CANGZHI_TOKEN` when it remains valid.
+
 ## Local development
 
 The Client build reuses the target DSH browser preset. `DSH_SOURCE` is therefore required, but no Cangzhi repository path is needed:

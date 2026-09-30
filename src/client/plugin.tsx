@@ -1518,6 +1518,7 @@ async function errorMessage(response: Response, fallback: string): Promise<strin
 function LoginPanel({ onAuthenticated }: { onAuthenticated(): void }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [remember, setRemember] = useState(false)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
   const submit = async (event: React.FormEvent) => {
@@ -1525,7 +1526,7 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(): void }) {
     setBusy(true); setError('')
     const response = await fetch(`${API}/auth/login`, {
       method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, remember }),
     })
     setBusy(false)
     if (!response.ok) { setError(await errorMessage(response, '登录失败')); return }
@@ -1538,6 +1539,7 @@ function LoginPanel({ onAuthenticated }: { onAuthenticated(): void }) {
     <form onSubmit={submit} className={css.loginForm}>
       <input value={username} onChange={event => setUsername(event.target.value)} placeholder="用户名" autoComplete="username" required />
       <input value={password} onChange={event => setPassword(event.target.value)} placeholder="密码" type="password" autoComplete="current-password" required />
+      <label><input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)}/>记住此浏览器（闲置 7 天失效，最长 30 天）</label>
       {error && <div className={css.errorBanner}>{error}</div>}
       <button disabled={busy}>{busy ? '登录中…' : '登录'}</button>
     </form>
@@ -2254,6 +2256,8 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [loginUsername, setLoginUsername] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
+  const [rememberBrowser, setRememberBrowser] = useState(false)
+  const [tokenReady, setTokenReady] = useState<boolean | null>(null)
   const [documents, setDocuments] = useState<WorkbenchDocument[]>([])
   const [results, setResults] = useState<WorkbenchDocument[]>([])
   const [query, setQuery] = useState('')
@@ -2334,6 +2338,15 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     if (requestId !== loadRequestRef.current) return
     setAuth(authValue)
     if (pluginResponse.ok) setPlugin(await pluginResponse.json() as PluginStatus)
+    const tokenResponse = await fetch('/_cangzhi-plugin/token', { cache: 'no-store' })
+    if (tokenResponse.ok) {
+      const health = await tokenResponse.json() as { configured: boolean; valid: boolean }
+      if (requestId !== loadRequestRef.current) return
+      setTokenReady(health.valid)
+      if (health.configured && !health.valid) setNotice('藏知对话令牌已失效，请重新连接工具')
+    } else {
+      setTokenReady(null)
+    }
     if (!authValue.authenticated) {
       setWorkspace(null); setWorkspaces([]); setDocuments([]); setResults([]); setSelected(null); setPinned([]); setPreviewUrl(''); setPreviewText(''); setPreviewTable(null); setEvidenceContext(null); setEvidenceRows(null)
       workspaceSlugRef.current = null
@@ -2405,6 +2418,14 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     })
     if (!setup.ok) throw new Error(await errorMessage(setup, 'DSH 凭据写入失败'))
   }
+  const ensureConnection = async (): Promise<'reused' | 'created'> => {
+    const healthResponse = await fetch('/_cangzhi-plugin/token', { cache: 'no-store' })
+    if (!healthResponse.ok) throw new Error(await errorMessage(healthResponse, '藏知对话连接检查失败'))
+    const health = await healthResponse.json() as { configured: boolean; valid: boolean }
+    if (health.configured && health.valid) return 'reused'
+    await provisionConnection()
+    return 'created'
+  }
   const login = async (event: React.FormEvent) => {
     event.preventDefault()
     if (busy) return
@@ -2412,20 +2433,25 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     try {
       const response = await fetch(`${API}/auth/login`, {
         method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ username: loginUsername, password: loginPassword }),
+        body: JSON.stringify({ username: loginUsername, password: loginPassword, remember: rememberBrowser }),
       })
       if (!response.ok) throw new Error(await errorMessage(response, '登录失败'))
-      await provisionConnection()
       setLoginPassword('')
-      setNotice('登录成功，藏知对话工具已连接')
-      await load()
+      try {
+        const result = await ensureConnection()
+        setTokenReady(true)
+        setNotice(result === 'reused' ? '登录成功，已复用藏知对话连接' : '登录成功，藏知对话工具已连接')
+      } catch (connectionError) {
+        setNotice(`已登录藏知，但对话工具连接失败：${connectionError instanceof Error ? connectionError.message : '请重试连接'}`)
+      }
+      await load().catch(caught => setNotice(`已登录藏知，但资料读取失败：${caught instanceof Error ? caught.message : '请重试'}`))
     } catch (caught) { setNotice(caught instanceof Error ? caught.message : '登录失败，请重试') }
     finally { setBusy(false) }
   }
   const connect = async () => {
     if (busy) return
     setBusy(true); setNotice('正在连接藏知对话工具…')
-    try { await provisionConnection(); setNotice('藏知对话工具已连接'); await load() }
+    try { await ensureConnection(); setTokenReady(true); setNotice('藏知对话工具已连接'); await load() }
     catch (caught) { setNotice(caught instanceof Error ? caught.message : '连接失败，请重试') }
     finally { setBusy(false) }
   }
@@ -2436,6 +2462,7 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
       const response = await fetch('/_cangzhi-plugin/token', { method: 'DELETE' })
       if (!response.ok) throw new Error(await errorMessage(response, '断开失败'))
       setPlugin(value => value === null ? null : { ...value, mcpConfigured: false, toolCount: 0 })
+      setTokenReady(false)
       setNotice('已断开藏知对话工具')
     } catch (caught) { setNotice(caught instanceof Error ? caught.message : '断开失败，请重试') }
     finally { setBusy(false) }
@@ -2692,10 +2719,10 @@ function SessionKnowledgeWorkbench({ useCangzhiConsole, currentSessionId, subscr
     <div className={css.workbenchResize} role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整藏知工作台宽度：左键加宽，右键收窄，Home 最窄，End 最宽" aria-valuemin={WORKBENCH_SIZE_MIN} aria-valuemax={WORKBENCH_SIZE_MAX} aria-valuenow={width} onKeyDown={resizeWithKeyboard} onPointerDown={beginResize} onPointerMove={resize} onPointerUp={endResize} onPointerCancel={endResize}/>
     <header className={css.workbenchHeader}><div><CangzhiMark size={25}/><span><strong>藏知工作台</strong><small>{workspace?.name ?? '当前知识空间'}</small></span></div><div><button title="连接设置" onClick={() => setTab('settings')}>⚙</button><button title="知识库管理中心" onClick={openConsole}>↗</button><button title="关闭工作台" onClick={closeKnowledge}>×</button></div></header>
     <nav className={css.workbenchTabs} aria-label="藏知工作台视图"><button data-active={String(tab === 'browse')} onClick={() => setTab('browse')}>资料</button><button data-active={String(tab === 'preview')} onClick={() => setTab('preview')}>预览{selected ? ' · 1' : ''}</button><button data-active={String(tab === 'context')} onClick={() => setTab('context')}>本对话{pinned.length > 0 ? ` · ${pinned.length}` : ''}</button><button data-active={String(tab === 'settings')} onClick={() => setTab('settings')}>设置</button></nav>
-    {tab === 'settings' ? <div className={css.workbenchSettings}><CangzhiSettingsTab settingsScope={settingsScope} t={t}/></div> : auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <form className={css.workbenchLogin} onSubmit={login}><CangzhiMark size={44}/><h3>登录后使用藏知</h3><p>登录和连接都在当前工作台完成，不再打开额外弹窗。</p><input value={loginUsername} onChange={event => setLoginUsername(event.target.value)} placeholder="用户名" autoComplete="username" required/><input value={loginPassword} onChange={event => setLoginPassword(event.target.value)} placeholder="密码" type="password" autoComplete="current-password" required/><button disabled={busy}>{busy ? '正在连接…' : '登录并连接'}</button></form> : <>
+    {tab === 'settings' ? <div className={css.workbenchSettings}><CangzhiSettingsTab settingsScope={settingsScope} t={t}/></div> : auth === null ? <div className={css.drawerLogin}><CangzhiMark size={44}/><h3>正在载入知识资料</h3><p>正在连接当前知识空间，请稍候。</p></div> : !auth.authenticated ? <form className={css.workbenchLogin} onSubmit={login}><CangzhiMark size={44}/><h3>登录后使用藏知</h3><p>登录和连接都在当前工作台完成，不再打开额外弹窗。</p><input value={loginUsername} onChange={event => setLoginUsername(event.target.value)} placeholder="用户名" autoComplete="username" required/><input value={loginPassword} onChange={event => setLoginPassword(event.target.value)} placeholder="密码" type="password" autoComplete="current-password" required/><label><input type="checkbox" checked={rememberBrowser} onChange={event => setRememberBrowser(event.target.checked)}/>记住此浏览器（闲置 7 天失效，最长 30 天）</label><button disabled={busy}>{busy ? '正在连接…' : '登录并连接'}</button></form> : <>
       <section className={css.workbenchControls} aria-label="藏知会话控制">
         <div><span><strong>本对话使用藏知</strong><small>{knowledgeSession.policy === 'on' ? '下一步允许调用藏知工具' : '下一步不会调用藏知工具'}</small></span><div className={css.workbenchPolicy} role="radiogroup" aria-label="本对话是否使用藏知"><button type="button" role="radio" aria-checked={knowledgeSession.policy === 'off'} data-active={String(knowledgeSession.policy === 'off')} disabled={busy} onClick={() => void setConversationPolicy('off')}>关闭</button><button type="button" role="radio" aria-checked={knowledgeSession.policy === 'on'} data-active={String(knowledgeSession.policy === 'on')} disabled={busy} onClick={() => void setConversationPolicy('on')}>开启</button></div></div>
-        <div><label><strong>知识空间</strong><select value={workspace?.slug ?? ''} disabled={busy || workspaces.length === 0} onChange={event => void switchWorkspace(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select></label><button type="button" disabled={busy} onClick={() => void (plugin?.mcpConfigured ? disconnect() : connect())}>{plugin?.mcpConfigured ? '断开连接' : '连接工具'}</button></div>
+        <div><label><strong>知识空间</strong><select value={workspace?.slug ?? ''} disabled={busy || workspaces.length === 0} onChange={event => void switchWorkspace(event.target.value)}>{workspaces.filter(item => item.status === 'active').map(item => <option key={item.id} value={item.slug}>{item.name}</option>)}</select></label><button type="button" disabled={busy} onClick={() => void (tokenReady ? disconnect() : connect())}>{tokenReady ? '断开连接' : '连接工具'}</button></div>
       </section>
       {tab === 'browse' && <section className={css.workbenchPane}><div className={css.drawerToolbar}><form onSubmit={search}><span>⌕</span><input value={query} aria-label="搜索当前空间资料" onChange={event => { if (!event.target.value.trim()) clearSearch(); else setQuery(event.target.value) }} placeholder="搜索标题、正文或知识片段"/><button disabled={busy || searching || !workspace}>{searching ? '搜索中…' : '搜索'}</button>{(query || submittedQuery) && <button type="button" onClick={clearSearch} aria-label="清除搜索，返回最近资料">清除</button>}</form><input ref={uploadInput} hidden type="file" accept=".pdf,.doc,.docx,.xlsx,.xls,.md,.txt" multiple onChange={event => void upload(event.target.files)}/><button title="上传资料" onClick={() => uploadInput.current?.click()} disabled={busy || !workspace}>＋</button></div><div className={css.drawerSectionTitle}><strong>{submittedQuery ? `“${submittedQuery}”的搜索结果` : '最近资料'}</strong><span role="status">{searching ? '搜索中，暂保留原列表…' : `${visible.length} 项`}</span></div><div className={css.workbenchResults} aria-busy={searching}>{visible.length === 0 ? <div className={css.drawerEmpty}>{submittedQuery ? '没有找到匹配资料，请尝试更短的关键词或清除搜索。' : '当前空间暂无资料，可以上传文件或前往知识库管理。'}</div> : visible.map(item => <button key={item.id} data-selected={String(selected?.id === item.id)} onClick={() => void preview(item)}><span className={css.drawerFileIcon}>{item.source_type === 'note' ? '✎' : item.source_type === 'url' ? '↗' : '▤'}</span><div><strong>{item.title}</strong><small>{item.category || item.source_type}{item.updated_at ? ` · ${new Date(item.updated_at).toLocaleDateString()}` : ''}</small>{item.snippet && <p>{item.snippet.replace(/\s+/g, ' ').slice(0, 150)}</p>}</div></button>)}</div></section>}
       {tab === 'preview' && <section className={css.workbenchPreview}><div className={css.previewToolbar}><button onClick={() => setTab('browse')}>‹ 返回资料</button><strong title={selected?.title}>{selected?.title ?? '资料预览'}</strong>{selected && <button data-primary="true" onClick={() => useDocument(selected)}>{pinned.some(item => item.id === selected.id) ? '再次准备提问' : '准备提问'}</button>}</div>{evidenceContext ? <EvidenceWorkbenchPreview context={evidenceContext} rows={evidenceRows}/> : previewUrl ? <object data={previewUrl} type="application/pdf" aria-label={`${selected?.title ?? '资料'}预览`}><p>当前浏览器无法显示 PDF 预览。</p></object> : previewText ? <div className={css.exactEvidencePreview}>{classifyDocumentPreview({ contentKind: selected?.content_kind, sourceType: selected?.source_type, documentType: selected?.document_type, title: selected?.title }) === 'markdown' ? <WorkbenchMarkdownPreview markdown={previewText}/> : <pre className={css.markdownPreview}>{previewText}</pre>}</div> : previewTable ? <div className={css.tablePreview}><p>{previewTable.evidenceMode === 'catalog' && previewTable.evidenceVersionId !== undefined ? `版本绑定目录数据集 · version ${previewTable.evidenceVersionId} · ` : ''}共 {previewTable.total} 行，当前显示第 {previewTable.offset + 1}–{Math.min(previewTable.offset + previewTable.rows.length, previewTable.total)} 行</p><div className={css.tableScroll}><table><thead><tr>{previewTable.columns.map(column => <th key={column}>{column}</th>)}</tr></thead><tbody>{previewTable.rows.map((row, index) => <tr key={String(row.row_number ?? previewTable.offset + index)}>{previewTable.columns.map(column => <td key={column}>{formatPreviewValue(row[column])}</td>)}</tr>)}</tbody></table></div><div className={css.tablePagination}><span>第 {Math.floor(previewTable.offset / previewTable.limit) + 1} / {Math.max(1, Math.ceil(previewTable.total / previewTable.limit))} 页</span><div><button disabled={busy || previewTable.offset === 0} onClick={() => changeTablePage(previewTable.offset - previewTable.limit)}>上一页</button><button disabled={busy || previewTable.offset + previewTable.rows.length >= previewTable.total} onClick={() => changeTablePage(previewTable.offset + previewTable.limit)}>下一页</button></div><label>每页 <select disabled={busy} value={previewTable.limit} onChange={event => changeTablePage(0, Number(event.target.value))}><option value="25">25</option><option value="50">50</option><option value="100">100</option><option value="200">200</option></select> 行</label></div></div> : <div className={css.previewPlaceholder}><span>▤</span><p>{previewState}</p></div>}</section>}

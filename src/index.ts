@@ -17,6 +17,7 @@ import { createDomainStore } from './host/domain-store.mjs'
 import { createSessionManager } from './host/session-manager.mjs'
 import { sessionStateDomainSpec } from './host/storage-open.mjs'
 import { CANGZHI_TOOLS } from './host/tool-names.mjs'
+import { checkStoredToken } from './host/token-health.mjs'
 
 export const name = 'cangzhi'
 export const inject = ['systemPrompt', 'tools', 'webServer', 'connection', 'credentials', 'settings', 'agents']
@@ -537,6 +538,19 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     handler: async (req, res) => {
       const rejection = ctx.connection.requestRejection(req)
       if (rejection !== undefined) { res.writeHead(rejection); res.end(); return }
+      if (req.method === 'GET') {
+        try {
+          const health = await checkStoredToken(
+            ctx.credentials, TOKEN_REF,
+            apiEndpoint(apiUrl, '/api/v1/knowledge/scopes'), activeWorkspaceSlug,
+          )
+          writeJson(res, health)
+        } catch (error) {
+          res.writeHead(503, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+          res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+        }
+        return
+      }
       if (req.method === 'DELETE') {
         try {
           await ctx.credentials.unset(TOKEN_REF)
@@ -547,7 +561,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         }
         return
       }
-      if (req.method !== 'POST') { res.writeHead(405, { allow: 'POST, DELETE' }); res.end(); return }
+      if (req.method !== 'POST') { res.writeHead(405, { allow: 'GET, POST, DELETE' }); res.end(); return }
       try {
         const body = await jsonBody(req)
         const token = typeof body.token === 'string' ? body.token.trim() : ''
